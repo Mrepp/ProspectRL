@@ -36,7 +36,8 @@ dev = [
     "ruff>=0.1.0",
 ]
 colab = [
-    "prospect-rl[deploy]",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
 ]
 all = [
     "prospect-rl[deploy,viz,dev]",
