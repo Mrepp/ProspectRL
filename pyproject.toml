@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prospect-rl"
+version = "0.1.0"
+description = "PPO-based RL for ComputerCraft Turtle Mining with Dynamic Reward Shifting"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+
+dependencies = [
+    "gymnasium>=0.29.0",
+    "stable-baselines3[extra]>=2.3.0",
+    "sb3-contrib>=2.3.0",
+    "opensimplex>=0.4",
+    "numpy>=1.24.0",
+    "torch>=2.0.0",
+    "tensorboard>=2.14.0",
+]
+
+[project.optional-dependencies]
+deploy = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+]
+viz = [
+    "pyvista>=0.43.0",
+    "trame>=3.0.0",
+    "matplotlib>=3.7.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+]
+all = [
+    "prospect-rl[deploy,viz,dev]",
+]
+
+[project.scripts]
+prospect-train = "prospect_rl.train:main"
+prospect-eval = "prospect_rl.evaluate:main"
+prospect-serve = "prospect_rl.deployment.inference_server:main"
+
+[tool.setuptools.package-dir]
+"prospect_rl" = "."
+"prospect_rl.env" = "env"
+"prospect_rl.env.world" = "env/world"
+"prospect_rl.models" = "models"
+"prospect_rl.deployment" = "deployment"
+"prospect_rl.multiagent" = "multiagent"
+
+[tool.setuptools]
+packages = [
+    "prospect_rl",
+    "prospect_rl.env",
+    "prospect_rl.env.world",
+    "prospect_rl.models",
+    "prospect_rl.deployment",
+    "prospect_rl.multiagent",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
