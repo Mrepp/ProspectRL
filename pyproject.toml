@@ -47,6 +47,7 @@ all = [
 prospect-train = "prospect_rl.train:main"
 prospect-eval = "prospect_rl.evaluate:main"
 prospect-serve = "prospect_rl.deployment.inference_server:main"
+prospect-viz-episode = "prospect_rl.viz_episode:main"
 
 [tool.setuptools.package-dir]
 "prospect_rl" = "."

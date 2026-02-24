@@ -447,7 +447,7 @@ CURRICULUM_STAGES: list[CurriculumStage] = [
         preference_mode="one_hot",
         max_episode_steps=500,
         advancement_metric="mean_reward",
-        advancement_threshold=50.0,
+        advancement_threshold=25.0,
         advancement_window=100,
     ),
     CurriculumStage(
@@ -512,10 +512,10 @@ CURRICULUM_STAGES: list[CurriculumStage] = [
 @dataclass
 class PPOConfig:
     """PPO training hyperparameters."""
-    learning_rate: float = 3e-4
-    n_steps: int = 512
-    batch_size: int = 64
-    n_epochs: int = 10
+    learning_rate: float = 1e-4
+    n_steps: int = 2048
+    batch_size: int = 256
+    n_epochs: int = 4
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2

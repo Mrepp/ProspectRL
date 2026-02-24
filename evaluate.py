@@ -46,6 +46,50 @@ def _build_preference_grid() -> list[tuple[str, np.ndarray]]:
     return grid
 
 
+def _load_obs_normalizer(
+    vecnormalize_path: str,
+    stage_index: int,
+) -> callable:
+    """Load VecNormalize stats and return a function that normalizes obs.
+
+    The returned callable applies the same scalar normalization that was
+    used during training (zero-mean, unit-variance, clipped) so the
+    policy sees the distribution it was trained on.
+    """
+    from prospect_rl.env.mining_env import MinecraftMiningEnv
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+    dummy = DummyVecEnv([
+        lambda: MinecraftMiningEnv(curriculum_stage=stage_index, seed=0),
+    ])
+    vn = VecNormalize.load(vecnormalize_path, dummy)
+    vn.training = False
+    vn.norm_reward = False
+
+    # Extract running statistics for the "scalars" key
+    obs_rms = vn.obs_rms
+    clip_obs = vn.clip_obs
+
+    if isinstance(obs_rms, dict):
+        rms = obs_rms["scalars"]
+    else:
+        rms = obs_rms
+
+    mean = rms.mean.astype(np.float32)
+    std = np.sqrt(rms.var.astype(np.float32) + 1e-8)
+
+    def normalize(obs: dict) -> dict:
+        out = dict(obs)
+        out["scalars"] = np.clip(
+            (obs["scalars"] - mean) / std,
+            -clip_obs,
+            clip_obs,
+        ).astype(np.float32)
+        return out
+
+    return normalize
+
+
 def evaluate(
     model_path: str,
     vecnormalize_path: str | None = None,
@@ -60,6 +104,10 @@ def evaluate(
     from sb3_contrib import MaskablePPO
 
     model = MaskablePPO.load(model_path)
+
+    normalize = None
+    if vecnormalize_path is not None:
+        normalize = _load_obs_normalizer(vecnormalize_path, stage_index)
 
     grid = _build_preference_grid()
     results: dict = {}
@@ -76,8 +124,9 @@ def evaluate(
             )
 
             obs, info = env.reset()
-            # Override preference
             obs["pref"] = pref_vec.copy()
+            if normalize is not None:
+                obs = normalize(obs)
 
             total_reward = 0.0
             ore_count = 0
@@ -95,6 +144,8 @@ def evaluate(
                     int(action),
                 )
                 obs["pref"] = pref_vec.copy()
+                if normalize is not None:
+                    obs = normalize(obs)
                 total_reward += reward
                 if info.get("block_mined") is not None:
                     bt = info["block_mined"]
