@@ -116,6 +116,7 @@ def evaluate(
         episode_rewards = []
         episode_ores = []
         episode_steps_list = []
+        episode_potentials = []
 
         for ep in range(n_episodes):
             env = MinecraftMiningEnv(
@@ -124,6 +125,8 @@ def evaluate(
             )
 
             obs, info = env.reset()
+            # Set preference on both obs and internal env state
+            env._preference = pref_vec.copy()
             obs["pref"] = pref_vec.copy()
             if normalize is not None:
                 obs = normalize(obs)
@@ -132,6 +135,7 @@ def evaluate(
             ore_count = 0
             done = False
             ep_steps = 0
+            final_potential = 0.0
 
             while not done:
                 action_mask = env.action_masks()
@@ -151,18 +155,23 @@ def evaluate(
                     bt = info["block_mined"]
                     if bt in [int(o) for o in ORE_TYPES]:
                         ore_count += 1
+                final_potential = info.get(
+                    "harvest_potential", 0.0,
+                )
                 done = terminated or truncated
                 ep_steps += 1
 
             episode_rewards.append(total_reward)
             episode_ores.append(ore_count)
             episode_steps_list.append(ep_steps)
+            episode_potentials.append(final_potential)
 
         results[pref_name] = {
             "mean_reward": float(np.mean(episode_rewards)),
             "std_reward": float(np.std(episode_rewards)),
             "mean_ores": float(np.mean(episode_ores)),
             "mean_steps": float(np.mean(episode_steps_list)),
+            "mean_potential": float(np.mean(episode_potentials)),
         }
 
     return results
@@ -195,14 +204,19 @@ def main() -> None:
         n_episodes=args.episodes,
     )
 
-    print(f"\n{'Preference':<25} {'Reward':>10} {'Ores':>8} {'Steps':>8}")
-    print("-" * 55)
+    header = (
+        f"{'Preference':<25} {'Reward':>10} {'Ores':>8}"
+        f" {'Steps':>8} {'Potential':>10}"
+    )
+    print(f"\n{header}")
+    print("-" * 65)
     for name, metrics in results.items():
         print(
             f"{name:<25} "
             f"{metrics['mean_reward']:>10.2f} "
             f"{metrics['mean_ores']:>8.1f} "
-            f"{metrics['mean_steps']:>8.1f}"
+            f"{metrics['mean_steps']:>8.1f} "
+            f"{metrics['mean_potential']:>10.4f}"
         )
 
 

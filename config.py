@@ -340,7 +340,7 @@ ORE_DISTRIBUTIONS: list[OreSpawnConfig] = ORE_SPAWN_CONFIGS
 # Reward Configuration
 # ---------------------------------------------------------------------------
 
-# Base value of mining each ore (used in reward vector)
+# DEPRECATED — use RewardConfig instead. Kept for backward compatibility.
 ORE_BASE_VALUES: dict[int, float] = {
     BlockType.COAL_ORE: 1.0,
     BlockType.IRON_ORE: 2.0,
@@ -352,7 +352,7 @@ ORE_BASE_VALUES: dict[int, float] = {
     BlockType.COPPER_ORE: 1.5,
 }
 
-# Fixed cost weights (not user-adjustable at runtime)
+# DEPRECATED — use RewardConfig instead. Kept for backward compatibility.
 COST_WEIGHTS: dict[str, float] = {
     "movement": -0.01,
     "dig": -0.005,
@@ -362,8 +362,35 @@ COST_WEIGHTS: dict[str, float] = {
     "exploration_bonus": 0.02,  # per step when visiting a new position
 }
 
-# Alpha: balance between ore reward and cost penalty
+# DEPRECATED — use RewardConfig instead.
 REWARD_ALPHA: float = 1.0
+
+
+@dataclass
+class RewardConfig:
+    """Potential-based harvest efficiency reward system.
+
+    Uses an exponential potential function for smooth, stable PPO gradients:
+    f(mined, total) = 1 - exp(-mined / (kappa * total + epsilon))
+    """
+
+    # Potential-based harvest
+    harvest_alpha: float = 8.0         # scale per-step potential delta
+    episode_bonus_gamma: float = 3.0   # scale end-of-episode potential bonus
+    harvest_kappa: float = 0.4         # exponential saturation parameter
+    harvest_epsilon: float = 1.0       # prevents division by zero
+
+    # Adjacent ore penalty (softened with tanh)
+    adjacent_penalty_beta: float = 0.05  # base penalty weight
+    adjacent_skip_lambda: float = 0.1    # opportunity cost decay per consecutive skip
+
+    # Local clear bonus
+    local_clear_bonus: float = 0.2     # bonus when all adjacent desired ores cleared
+
+    # Operational costs
+    fuel_penalty: float = -0.1         # per step when fuel < 10% max
+    death_penalty: float = -10.0       # episode termination from fuel=0
+    time_penalty: float = -0.001       # per step, encourages efficiency
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +608,7 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
     cave: CaveConfig = field(default_factory=CaveConfig)
+    reward: RewardConfig = field(default_factory=RewardConfig)
 
     # Derived / convenience
     @property

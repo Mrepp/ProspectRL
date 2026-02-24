@@ -85,8 +85,9 @@ class MetricsCallback(BaseCallback):
     def __init__(self, verbose: int = 0) -> None:
         super().__init__(verbose)
         self._episode_ores: dict[int, list[int]] = {}
-        self._episode_rewards: dict[int, list[float]] = {}
-        self._episode_exploration: dict[int, float] = {}
+        self._episode_harvest: dict[int, list[float]] = {}
+        self._episode_adjacent: dict[int, list[float]] = {}
+        self._episode_clears: dict[int, int] = {}
 
     def _on_step(self) -> bool:
         for i, info in enumerate(self.locals.get("infos", [])):
@@ -97,12 +98,20 @@ class MetricsCallback(BaseCallback):
                     block_mined,
                 )
 
-            # Accumulate exploration bonus from r_cost[5]
-            r_cost = info.get("r_cost")
-            if r_cost is not None and len(r_cost) > 5:
-                self._episode_exploration[i] = (
-                    self._episode_exploration.get(i, 0.0)
-                    + float(r_cost[5])
+            # Accumulate reward components
+            r_harvest = info.get("r_harvest", 0.0)
+            r_adjacent = info.get("r_adjacent", 0.0)
+            r_clear = info.get("r_clear", 0.0)
+
+            self._episode_harvest.setdefault(i, []).append(
+                r_harvest,
+            )
+            self._episode_adjacent.setdefault(i, []).append(
+                r_adjacent,
+            )
+            if r_clear > 0:
+                self._episode_clears[i] = (
+                    self._episode_clears.get(i, 0) + 1
                 )
 
             # Check for episode end
@@ -132,8 +141,20 @@ class MetricsCallback(BaseCallback):
                     info.get("explored_count", 0),
                 )
                 self.logger.record(
-                    "mining/exploration_bonus_total",
-                    self._episode_exploration.pop(i, 0.0),
+                    "mining/harvest_potential",
+                    info.get("harvest_potential", 0.0),
+                )
+                self.logger.record(
+                    "mining/cumulative_harvest_delta",
+                    sum(self._episode_harvest.pop(i, [])),
+                )
+                self.logger.record(
+                    "mining/cumulative_adjacent_penalty",
+                    sum(self._episode_adjacent.pop(i, [])),
+                )
+                self.logger.record(
+                    "mining/local_clears",
+                    self._episode_clears.pop(i, 0),
                 )
 
         return True

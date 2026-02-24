@@ -1,26 +1,26 @@
 """Preference vector sampling and reward scalarization.
 
 During training a random preference vector is sampled at each episode reset.
-The scalarize method combines the vectorized ore/cost rewards into a single
-scalar reward used by PPO.
+The scalarize method combines the reward components into a single scalar
+reward used by PPO.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from prospect_rl.config import NUM_ORE_TYPES, REWARD_ALPHA
+from prospect_rl.config import NUM_ORE_TYPES, RewardConfig
 
-# Fixed cost weight vector — order matches r_cost from compute_reward_vector
-_COST_WEIGHT_VEC = np.array(
-    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-    dtype=np.float32,
-)
+_DEFAULT_CFG = RewardConfig()
 
 
 class PreferenceManager:
     """Samples and scalarizes preference-weighted rewards."""
 
-    def __init__(self, num_ores: int = NUM_ORE_TYPES, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        num_ores: int = NUM_ORE_TYPES,
+        seed: int | None = None,
+    ) -> None:
         self.rng = np.random.default_rng(seed)
         self.num_ores = num_ores
 
@@ -41,7 +41,9 @@ class PreferenceManager:
 
         if mode == "two_mix":
             w = np.zeros(self.num_ores, dtype=np.float32)
-            indices = self.rng.choice(self.num_ores, size=2, replace=False)
+            indices = self.rng.choice(
+                self.num_ores, size=2, replace=False,
+            )
             split = self.rng.uniform(0.1, 0.9)
             w[indices[0]] = np.float32(split)
             w[indices[1]] = np.float32(1.0 - split)
@@ -58,17 +60,32 @@ class PreferenceManager:
 
     @staticmethod
     def scalarize(
-        w_ore: np.ndarray,
-        r_ore: np.ndarray,
-        r_cost: np.ndarray,
+        r_harvest: float,
+        r_adjacent: float,
+        r_clear: float,
+        r_ops: float,
+        reward_config: RewardConfig | None = None,
     ) -> float:
-        """Combine ore-reward and cost vectors into a scalar reward.
+        """Combine reward components into a scalar reward.
 
-        ``R = REWARD_ALPHA * dot(w_ore, r_ore) + sum(r_cost)``
+        ``R = ALPHA * r_harvest + r_adjacent + r_clear + r_ops``
 
-        ``r_cost`` values already contain their signs (negative), so we
-        simply sum them.
+        ``r_adjacent`` already contains the ``-BETA`` factor.
+        ``r_ops`` values already contain their signs (negative).
         """
-        ore_reward = float(REWARD_ALPHA * np.dot(w_ore, r_ore))
-        cost_reward = float(np.sum(r_cost))
-        return ore_reward + cost_reward
+        cfg = reward_config or _DEFAULT_CFG
+        return (
+            cfg.harvest_alpha * r_harvest
+            + r_adjacent
+            + r_clear
+            + r_ops
+        )
+
+    @staticmethod
+    def compute_episode_bonus(
+        potential: float,
+        reward_config: RewardConfig | None = None,
+    ) -> float:
+        """End-of-episode bonus proportional to final harvest potential."""
+        cfg = reward_config or _DEFAULT_CFG
+        return cfg.episode_bonus_gamma * potential
