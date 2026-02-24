@@ -17,6 +17,7 @@ from prospect_rl.config import (
     ORE_TYPES,
     Action,
     RewardConfig,
+    Stage1RewardConfig,
 )
 
 # Pre-compute ore-type index lookup for fast reward assignment
@@ -26,6 +27,7 @@ _ORE_INDEX: dict[int, int] = {int(bt): i for i, bt in enumerate(ORE_TYPES)}
 _DIG_ACTIONS = frozenset({Action.DIG, Action.DIG_UP, Action.DIG_DOWN})
 
 _DEFAULT_CFG = RewardConfig()
+_DEFAULT_S1_CFG = Stage1RewardConfig()
 
 
 def _harvest_potential(
@@ -184,3 +186,94 @@ def compute_reward_components(
     r_ops = fuel_pen + time_pen
 
     return r_harvest, r_adjacent, r_clear, r_ops, new_potential, new_skip_count
+
+
+def compute_stage1_reward_components(
+    block_mined: int | None,
+    preference: np.ndarray,
+    mined_ore_counts: np.ndarray,
+    cumulative_waste_count: int,
+    is_new_position: bool,
+    stage1_config: Stage1RewardConfig | None = None,
+) -> tuple[float, float, float, float, int]:
+    """Compute Stage 1 reward components.
+
+    Stage 1 uses immediate per-ore rewards with a soft-then-sharp
+    waste penalty instead of the potential-based system.
+
+    Returns
+    -------
+    r_harvest:
+        Per-ore immediate reward (positive for target ore).
+    r_adjacent:
+        Always 0.0 for Stage 1.
+    r_clear:
+        Exploration bonus (positive for new cells).
+    r_ops:
+        Waste penalty (negative for non-target digs).
+    new_waste_count:
+        Updated cumulative waste count.
+    """
+    cfg = stage1_config or _DEFAULT_S1_CFG
+
+    r_harvest = 0.0
+    r_ops = 0.0
+    new_waste_count = cumulative_waste_count
+
+    if block_mined is not None:
+        if block_mined in _ORE_INDEX:
+            idx = _ORE_INDEX[block_mined]
+            mined_ore_counts[idx] += 1
+            if preference[idx] > 0:
+                # Target ore: immediate positive reward
+                r_harvest = cfg.per_ore_reward * float(
+                    preference[idx],
+                )
+            else:
+                # Non-target ore: waste with multiplier
+                new_waste_count += int(
+                    cfg.non_target_ore_multiplier,
+                )
+                ratio = min(
+                    1.0, new_waste_count / cfg.waste_ramp,
+                )
+                r_ops = -cfg.waste_beta * ratio ** cfg.waste_alpha
+        else:
+            # Non-ore block (stone, dirt, etc.): waste
+            new_waste_count += 1
+            ratio = min(
+                1.0, new_waste_count / cfg.waste_ramp,
+            )
+            r_ops = -cfg.waste_beta * ratio ** cfg.waste_alpha
+
+    # Adjacent penalty disabled for Stage 1
+    r_adjacent = 0.0
+
+    # Exploration bonus
+    r_clear = cfg.exploration_bonus if is_new_position else 0.0
+
+    return r_harvest, r_adjacent, r_clear, r_ops, new_waste_count
+
+
+def compute_stage1_terminal_bonus(
+    mined_ore_counts: np.ndarray,
+    preference: np.ndarray,
+    total_target_ores_in_world: int,
+    stage1_config: Stage1RewardConfig | None = None,
+) -> float:
+    """Compute end-of-episode completion bonus for Stage 1.
+
+    Returns ``completion_scale * (target_mined / target_in_world)``.
+    """
+    cfg = stage1_config or _DEFAULT_S1_CFG
+
+    if total_target_ores_in_world <= 0:
+        return 0.0
+
+    target_mined = float(
+        np.dot(preference > 0, mined_ore_counts),
+    )
+    completion = min(
+        1.0, target_mined / total_target_ores_in_world,
+    )
+    return cfg.completion_scale * completion

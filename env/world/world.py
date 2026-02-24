@@ -78,6 +78,13 @@ class World:
         """Set the block at ``(x, y, z)``."""
         self._blocks[x, y, z] = np.int8(block_id)
 
+    def count_blocks(self, block_ids: list[int]) -> int:
+        """Count total blocks matching any of the given IDs."""
+        mask = np.isin(
+            self._blocks, np.array(block_ids, dtype=np.int8),
+        )
+        return int(np.sum(mask))
+
     def get_local_cube(
         self, pos: np.ndarray, radius: int = 2,
     ) -> np.ndarray:

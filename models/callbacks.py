@@ -157,6 +157,27 @@ class MetricsCallback(BaseCallback):
                     self._episode_clears.pop(i, 0),
                 )
 
+                # Stage 1 specific metrics
+                target_mined = info.get("target_ores_mined")
+                if target_mined is not None:
+                    self.logger.record(
+                        "mining/target_ores_mined",
+                        target_mined,
+                    )
+                    self.logger.record(
+                        "mining/completion_ratio",
+                        info.get("completion_ratio", 0.0),
+                    )
+                    self.logger.record(
+                        "mining/cumulative_waste",
+                        info.get("cumulative_waste", 0),
+                    )
+                    tb = info.get("terminal_bonus", 0.0)
+                    if tb > 0:
+                        self.logger.record(
+                            "mining/terminal_bonus", tb,
+                        )
+
         return True
 
 

@@ -271,3 +271,80 @@ class TestReset:
         obs2, _ = env.reset(seed=9999)
         # Preferences should likely differ
         assert not np.array_equal(obs1["pref"], obs2["pref"])
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 Reward Integration
+# ---------------------------------------------------------------------------
+
+class TestStage1Integration:
+    def test_stage1_target_ore_positive_reward(self) -> None:
+        """Mining a target ore in Stage 1 gives positive reward."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+
+        # Find which ore is the target
+        pref = env._preference
+        target_idx = int(np.argmax(pref))
+        from prospect_rl.config import ORE_TYPES as OT
+        target_bt = int(OT[target_idx])
+
+        # Place target ore in front of turtle
+        fv = FACING_VECTORS[env._turtle.facing]
+        target_pos = env._turtle.position + fv
+        env._world[
+            target_pos[0], target_pos[1], target_pos[2]
+        ] = target_bt
+
+        _, reward, _, _, info = env.step(Action.DIG)
+        assert reward > 0.0
+        assert info["r_harvest"] > 0.0
+        assert info["r_adjacent"] == 0.0
+
+    def test_stage1_stone_negative_reward(self) -> None:
+        """Mining stone in Stage 1 gives small negative reward."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+
+        # Place stone in front of turtle
+        fv = FACING_VECTORS[env._turtle.facing]
+        target_pos = env._turtle.position + fv
+        env._world[
+            target_pos[0], target_pos[1], target_pos[2]
+        ] = int(BlockType.STONE)
+
+        _, reward, _, _, info = env.step(Action.DIG)
+        # r_ops should be negative (waste penalty)
+        assert info["r_ops"] < 0.0
+
+    def test_stage1_completion_ratio_in_info(self) -> None:
+        """Stage 1 info dict has completion_ratio."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+        _, _, _, _, info = env.step(Action.TURN_LEFT)
+        assert "completion_ratio" in info
+        assert "target_ores_mined" in info
+        assert "cumulative_waste" in info
+
+    def test_stage1_terminal_bonus_at_truncation(self) -> None:
+        """Terminal bonus fires at episode end."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+
+        # Fast-forward to near truncation
+        env._step_count = env._max_steps - 1
+
+        _, _, _, truncated, info = env.step(Action.TURN_LEFT)
+        assert truncated is True
+        assert "terminal_bonus" in info
+        # Bonus >= 0 (could be 0 if no target ores mined)
+        assert info["terminal_bonus"] >= 0.0
+
+    def test_stage1_count_target_ores(self) -> None:
+        """_count_target_ores matches manual scan."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+
+        count = env._count_target_ores()
+        assert count > 0  # with 10x density, should have ores
+        assert env._total_target_ores_in_world == count

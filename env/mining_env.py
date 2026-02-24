@@ -43,6 +43,8 @@ from prospect_rl.env.preference import PreferenceManager
 from prospect_rl.env.reward_vector import (
     _ORE_INDEX,
     compute_reward_components,
+    compute_stage1_reward_components,
+    compute_stage1_terminal_bonus,
 )
 from prospect_rl.env.turtle import Turtle
 
@@ -85,6 +87,13 @@ class _StubWorld:
     @property
     def shape(self) -> tuple[int, int, int]:
         return self._shape
+
+    def count_blocks(self, block_ids: list[int]) -> int:
+        """Count total blocks matching any of the given IDs."""
+        mask = np.isin(
+            self._grid, np.array(block_ids, dtype=np.int8),
+        )
+        return int(np.sum(mask))
 
     def get_sliding_window(
         self,
@@ -230,12 +239,19 @@ class MinecraftMiningEnv(gym.Env):
         self._step_count: int = 0
         self._max_steps: int = self._stage_cfg.max_episode_steps
 
+        # Stage detection
+        self._is_stage1: bool = (curriculum_stage == 0)
+
         # Reward state (initialised in reset)
         self._reference_total: float = 0.0
         self._mined_ore_counts = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
         self._potential: float = 0.0
         self._prev_adjacent_weight: float = 0.0
         self._consecutive_skip_count: int = 0
+
+        # Stage 1 reward state
+        self._cumulative_waste_count: int = 0
+        self._total_target_ores_in_world: int = 0
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -318,6 +334,13 @@ class MinecraftMiningEnv(gym.Env):
         self._prev_adjacent_weight = 0.0
         self._consecutive_skip_count = 0
 
+        # Stage 1: count target ores and reset waste
+        if self._is_stage1:
+            self._total_target_ores_in_world = (
+                self._count_target_ores()
+            )
+            self._cumulative_waste_count = 0
+
         obs = self._build_obs()
         info = self._build_info()
         return obs, info
@@ -333,8 +356,11 @@ class MinecraftMiningEnv(gym.Env):
         action = int(action)
         block_mined: int | None = None
 
-        # Adjacent weight BEFORE action (for penalty + local clear)
-        adj_weight_pre = self._compute_adjacent_desired_weight()
+        # Adjacent weight BEFORE action (stages 2-5 only)
+        if not self._is_stage1:
+            adj_weight_pre = (
+                self._compute_adjacent_desired_weight()
+            )
 
         # Execute action
         if action == Action.FORWARD:
@@ -359,11 +385,15 @@ class MinecraftMiningEnv(gym.Env):
             block_mined = self._get_dig_block(action)
             self._turtle.dig_down(self._world)
 
-        # Adjacent weight AFTER action (for local clear check)
-        adj_weight_post = self._compute_adjacent_desired_weight()
+        # Adjacent weight AFTER action (stages 2-5 only)
+        if not self._is_stage1:
+            adj_weight_post = (
+                self._compute_adjacent_desired_weight()
+            )
 
-        # Track explored positions
+        # Track explored positions (check newness BEFORE adding)
         tp = tuple(int(v) for v in self._turtle.position)
+        is_new_position = tp not in self._explored
         self._explored.add(tp)
 
         # Handle infinite fuel
@@ -378,31 +408,66 @@ class MinecraftMiningEnv(gym.Env):
         )
         truncated = self._step_count >= self._max_steps
 
-        # Compute reward components
-        (
-            r_harvest, r_adjacent, r_clear, r_ops,
-            self._potential, self._consecutive_skip_count,
-        ) = compute_reward_components(
-            action=action,
-            block_mined=block_mined,
-            turtle=self._turtle,
-            max_fuel=self._turtle.max_fuel,
-            preference=self._preference,
-            reference_total=self._reference_total,
-            mined_ore_counts=self._mined_ore_counts,
-            prev_potential=self._potential,
-            adjacent_desired_weight=adj_weight_pre,
-            adjacent_desired_weight_post=adj_weight_post,
-            prev_adjacent_weight=self._prev_adjacent_weight,
-            consecutive_skip_count=self._consecutive_skip_count,
-        )
+        # Compute reward components (stage-aware)
+        if self._is_stage1:
+            (
+                r_harvest, r_adjacent, r_clear, r_ops,
+                self._cumulative_waste_count,
+            ) = compute_stage1_reward_components(
+                block_mined=block_mined,
+                preference=self._preference,
+                mined_ore_counts=self._mined_ore_counts,
+                cumulative_waste_count=(
+                    self._cumulative_waste_count
+                ),
+                is_new_position=is_new_position,
+            )
 
-        reward = PreferenceManager.scalarize(
-            r_harvest, r_adjacent, r_clear, r_ops,
-        )
+            # Terminal completion bonus
+            terminal_bonus = 0.0
+            if terminated or truncated:
+                terminal_bonus = compute_stage1_terminal_bonus(
+                    mined_ore_counts=self._mined_ore_counts,
+                    preference=self._preference,
+                    total_target_ores_in_world=(
+                        self._total_target_ores_in_world
+                    ),
+                )
 
-        # Update state for next step
-        self._prev_adjacent_weight = adj_weight_post
+            reward = PreferenceManager.scalarize(
+                r_harvest, r_adjacent, r_clear, r_ops,
+            ) + terminal_bonus
+        else:
+            (
+                r_harvest, r_adjacent, r_clear, r_ops,
+                self._potential,
+                self._consecutive_skip_count,
+            ) = compute_reward_components(
+                action=action,
+                block_mined=block_mined,
+                turtle=self._turtle,
+                max_fuel=self._turtle.max_fuel,
+                preference=self._preference,
+                reference_total=self._reference_total,
+                mined_ore_counts=self._mined_ore_counts,
+                prev_potential=self._potential,
+                adjacent_desired_weight=adj_weight_pre,
+                adjacent_desired_weight_post=adj_weight_post,
+                prev_adjacent_weight=(
+                    self._prev_adjacent_weight
+                ),
+                consecutive_skip_count=(
+                    self._consecutive_skip_count
+                ),
+            )
+            terminal_bonus = 0.0
+
+            reward = PreferenceManager.scalarize(
+                r_harvest, r_adjacent, r_clear, r_ops,
+            )
+
+            # Update state for next step (stages 2-5)
+            self._prev_adjacent_weight = adj_weight_post
 
         obs = self._build_obs()
         info = self._build_info()
@@ -412,6 +477,25 @@ class MinecraftMiningEnv(gym.Env):
         info["r_ops"] = r_ops
         info["harvest_potential"] = self._potential
         info["block_mined"] = block_mined
+
+        # Stage 1 specific info
+        if self._is_stage1:
+            target_mined = int(np.dot(
+                self._preference > 0,
+                self._mined_ore_counts,
+            ))
+            info["target_ores_mined"] = target_mined
+            info["total_target_in_world"] = (
+                self._total_target_ores_in_world
+            )
+            info["completion_ratio"] = (
+                target_mined
+                / max(1, self._total_target_ores_in_world)
+            )
+            info["cumulative_waste"] = (
+                self._cumulative_waste_count
+            )
+            info["terminal_bonus"] = terminal_bonus
 
         return obs, float(reward), terminated, truncated, info
 
@@ -427,6 +511,19 @@ class MinecraftMiningEnv(gym.Env):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _count_target_ores(self) -> int:
+        """Count target ores in the world for the current preference."""
+        assert self._world is not None
+        assert self._preference is not None
+        target_ids = [
+            int(ORE_TYPES[i])
+            for i in range(len(ORE_TYPES))
+            if self._preference[i] > 0
+        ]
+        if not target_ids:
+            return 0
+        return self._world.count_blocks(target_ids)
 
     def _compute_adjacent_desired_weight(self) -> float:
         """Sum preference weights of desired ores adjacent to the turtle.

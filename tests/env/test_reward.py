@@ -8,13 +8,15 @@ from prospect_rl.config import (
     NUM_ORE_TYPES,
     BlockType,
     RewardConfig,
+    Stage1RewardConfig,
 )
 from prospect_rl.env.preference import PreferenceManager
 from prospect_rl.env.reward_vector import (
     _harvest_potential,
     compute_reward_components,
+    compute_stage1_reward_components,
+    compute_stage1_terminal_bonus,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -806,3 +808,250 @@ class TestPreferenceManager:
         pm = PreferenceManager(seed=42)
         with pytest.raises(ValueError):
             pm.sample("invalid_mode")
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 Reward System
+# ---------------------------------------------------------------------------
+
+
+_S1_CFG = Stage1RewardConfig()
+
+
+class TestStage1Reward:
+    def test_target_ore_gives_positive_reward(self) -> None:
+        """Mining a target ore gives per_ore_reward * preference."""
+        pref = _make_pref(3)  # diamond
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        r_h, _, _, _, _ = compute_stage1_reward_components(
+            block_mined=int(BlockType.DIAMOND_ORE),
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+        )
+        assert r_h == pytest.approx(
+            _S1_CFG.per_ore_reward * 1.0,
+        )
+
+    def test_no_harvest_for_non_target_ore(self) -> None:
+        """Mining non-preferred ore gives zero harvest reward."""
+        pref = _make_pref(3)  # diamond
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        r_h, _, _, _, _ = compute_stage1_reward_components(
+            block_mined=int(BlockType.COAL_ORE),
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+        )
+        assert r_h == 0.0
+
+    def test_non_target_ore_increases_waste(self) -> None:
+        """Mining non-preferred ore increases waste by multiplier."""
+        pref = _make_pref(3)  # diamond
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, _, _, new_waste = compute_stage1_reward_components(
+            block_mined=int(BlockType.COAL_ORE),
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+        )
+        assert new_waste == int(_S1_CFG.non_target_ore_multiplier)
+
+    def test_stone_mining_increases_waste(self) -> None:
+        """Mining stone increases waste count by 1."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, _, _, new_waste = compute_stage1_reward_components(
+            block_mined=int(BlockType.STONE),
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=5,
+            is_new_position=False,
+        )
+        assert new_waste == 6
+
+    def test_waste_penalty_soft_then_sharp(self) -> None:
+        """Waste penalty starts near zero and ramps quadratically."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        # Low waste: very small penalty
+        _, _, _, r_ops_low, _ = compute_stage1_reward_components(
+            block_mined=int(BlockType.STONE),
+            preference=pref,
+            mined_ore_counts=mined.copy(),
+            cumulative_waste_count=5,
+            is_new_position=False,
+        )
+
+        # High waste: larger penalty
+        _, _, _, r_ops_high, _ = compute_stage1_reward_components(
+            block_mined=int(BlockType.STONE),
+            preference=pref,
+            mined_ore_counts=mined.copy(),
+            cumulative_waste_count=80,
+            is_new_position=False,
+        )
+
+        assert r_ops_low < 0.0
+        assert r_ops_high < r_ops_low  # more negative
+
+    def test_waste_penalty_caps_at_beta(self) -> None:
+        """Waste penalty never exceeds -waste_beta per step."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, _, r_ops, _ = compute_stage1_reward_components(
+            block_mined=int(BlockType.STONE),
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=500,  # way over ramp
+            is_new_position=False,
+        )
+        assert r_ops >= -_S1_CFG.waste_beta
+
+    def test_exploration_bonus_on_new_cell(self) -> None:
+        """New position gives exploration bonus."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, r_clear, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=True,
+        )
+        assert r_clear == _S1_CFG.exploration_bonus
+
+    def test_no_exploration_bonus_on_revisit(self) -> None:
+        """Revisiting a cell gives zero exploration bonus."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, r_clear, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+        )
+        assert r_clear == 0.0
+
+    def test_no_adjacent_penalty(self) -> None:
+        """Stage 1 always returns r_adjacent=0.0."""
+        pref = _make_pref(3)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, r_adj, _, _, _ = compute_stage1_reward_components(
+            block_mined=int(BlockType.DIAMOND_ORE),
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=True,
+        )
+        assert r_adj == 0.0
+
+    def test_mined_counts_mutated_in_place(self) -> None:
+        """mined_ore_counts is updated in-place."""
+        pref = _make_pref(3)  # diamond = index 3
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        compute_stage1_reward_components(
+            block_mined=int(BlockType.DIAMOND_ORE),
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+        )
+        assert mined[3] == 1.0
+
+    def test_no_ops_when_no_dig(self) -> None:
+        """No waste penalty when no block is mined."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, _, r_ops, new_waste = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=50,
+            is_new_position=False,
+        )
+        assert r_ops == 0.0
+        assert new_waste == 50  # unchanged
+
+
+class TestStage1TerminalBonus:
+    def test_full_completion(self) -> None:
+        """100% completion gives completion_scale."""
+        pref = _make_pref(0)  # coal
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        mined[0] = 100.0
+
+        bonus = compute_stage1_terminal_bonus(
+            mined_ore_counts=mined,
+            preference=pref,
+            total_target_ores_in_world=100,
+        )
+        assert bonus == pytest.approx(_S1_CFG.completion_scale)
+
+    def test_zero_completion(self) -> None:
+        """0% completion gives zero bonus."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        bonus = compute_stage1_terminal_bonus(
+            mined_ore_counts=mined,
+            preference=pref,
+            total_target_ores_in_world=100,
+        )
+        assert bonus == 0.0
+
+    def test_partial_completion(self) -> None:
+        """50% completion gives half the scale."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        mined[0] = 50.0
+
+        bonus = compute_stage1_terminal_bonus(
+            mined_ore_counts=mined,
+            preference=pref,
+            total_target_ores_in_world=100,
+        )
+        assert bonus == pytest.approx(
+            _S1_CFG.completion_scale * 0.5,
+        )
+
+    def test_zero_target_ores_safe(self) -> None:
+        """No target ores in world returns 0 bonus."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        mined[0] = 10.0
+
+        bonus = compute_stage1_terminal_bonus(
+            mined_ore_counts=mined,
+            preference=pref,
+            total_target_ores_in_world=0,
+        )
+        assert bonus == 0.0
+
+    def test_completion_capped_at_one(self) -> None:
+        """Completion ratio caps at 1.0 even if over-mined."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        mined[0] = 200.0
+
+        bonus = compute_stage1_terminal_bonus(
+            mined_ore_counts=mined,
+            preference=pref,
+            total_target_ores_in_world=100,
+        )
+        assert bonus == pytest.approx(_S1_CFG.completion_scale)

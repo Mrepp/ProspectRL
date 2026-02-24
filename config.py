@@ -398,6 +398,33 @@ class RewardConfig:
     time_penalty: float = -0.005       # per step, encourages efficiency
 
 
+@dataclass
+class Stage1RewardConfig:
+    """Stage 1 reward: immediate ore mining with soft-then-sharp waste penalty.
+
+    Designed for one-shot performance in mining all target ores.
+    No fuel constraints, no adjacent penalty, no time penalty.
+    """
+
+    # Per-target-ore immediate reward
+    per_ore_reward: float = 0.1
+
+    # Terminal completion bonus: completion_scale * (target_mined / target_in_world)
+    completion_scale: float = 15.0
+
+    # Waste penalty (soft-then-sharp quadratic)
+    # Per non-target dig: -waste_beta * min(1, cumul_waste / waste_ramp)^waste_alpha
+    waste_beta: float = 0.05        # max penalty per waste-dig step
+    waste_ramp: int = 100           # waste count at which penalty reaches full beta
+    waste_alpha: float = 2.0        # exponent (2.0 = quadratic = soft-then-sharp)
+
+    # Exploration bonus per new cell visited
+    exploration_bonus: float = 0.02
+
+    # Non-target ore penalty multiplier (mining wrong ore counts as 1.5x waste)
+    non_target_ore_multiplier: float = 1.5
+
+
 # ---------------------------------------------------------------------------
 # Observation Configuration
 # ---------------------------------------------------------------------------
@@ -616,6 +643,9 @@ class Config:
     deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
     cave: CaveConfig = field(default_factory=CaveConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
+    stage1_reward: Stage1RewardConfig = field(
+        default_factory=Stage1RewardConfig,
+    )
 
     # Derived / convenience
     @property
