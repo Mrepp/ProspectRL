@@ -359,6 +359,7 @@ COST_WEIGHTS: dict[str, float] = {
     "fuel_penalty": -0.1,     # per step when fuel < 10% max
     "death_penalty": -10.0,   # episode termination from fuel=0
     "time_penalty": -0.001,   # per step, encourages efficiency
+    "exploration_bonus": 0.02,  # per step when visiting a new position
 }
 
 # Alpha: balance between ore reward and cost penalty

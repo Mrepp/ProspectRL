@@ -12,7 +12,7 @@ from prospect_rl.config import NUM_ORE_TYPES, REWARD_ALPHA
 
 # Fixed cost weight vector — order matches r_cost from compute_reward_vector
 _COST_WEIGHT_VEC = np.array(
-    [1.0, 1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     dtype=np.float32,
 )
 

@@ -28,6 +28,7 @@ def compute_reward_vector(
     block_mined: int | None,
     turtle: object,
     max_fuel: int,
+    is_new_position: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute the decomposed reward for a single step.
 
@@ -42,13 +43,16 @@ def compute_reward_vector(
         Current ``Turtle`` instance (read ``turtle.fuel``).
     max_fuel:
         Maximum fuel capacity (used for low-fuel threshold).
+    is_new_position:
+        Whether the turtle moved to a previously unvisited position.
 
     Returns
     -------
     r_ore:
         Shape ``(NUM_ORE_TYPES,)`` — reward contribution per ore type.
     r_cost:
-        Shape ``(5,)`` — ``[movement, dig, fuel_penalty, death_penalty, time_penalty]``.
+        Shape ``(6,)`` — ``[movement, dig, fuel_penalty, death_penalty,
+        time_penalty, exploration_bonus]``.
     """
     # --- Ore reward ---
     r_ore = np.zeros(NUM_ORE_TYPES, dtype=np.float32)
@@ -68,9 +72,13 @@ def compute_reward_vector(
         COST_WEIGHTS["death_penalty"] if turtle.fuel == 0 else 0.0
     )
     time_penalty = COST_WEIGHTS["time_penalty"]
+    exploration_bonus = (
+        COST_WEIGHTS["exploration_bonus"] if is_new_position else 0.0
+    )
 
     r_cost = np.array(
-        [movement_cost, dig_cost, fuel_penalty, death_penalty, time_penalty],
+        [movement_cost, dig_cost, fuel_penalty, death_penalty,
+         time_penalty, exploration_bonus],
         dtype=np.float32,
     )
 

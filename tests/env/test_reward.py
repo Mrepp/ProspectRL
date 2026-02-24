@@ -105,14 +105,57 @@ class TestRewardVector:
         )
         assert r_cost[3] == COST_WEIGHTS["death_penalty"]
 
-    def test_cost_penalties_are_negative(self) -> None:
+    def test_cost_penalties_are_negative_without_exploration(self) -> None:
         _, r_cost = compute_reward_vector(
             action=0,
             block_mined=None,
             turtle=_FakeTurtle(fuel=0),
             max_fuel=500,
+            is_new_position=False,
         )
         assert np.all(r_cost <= 0)
+
+    def test_r_cost_shape_is_six(self) -> None:
+        _, r_cost = compute_reward_vector(
+            action=0,
+            block_mined=None,
+            turtle=_FakeTurtle(fuel=100),
+            max_fuel=500,
+        )
+        assert r_cost.shape == (6,)
+
+    def test_exploration_bonus_when_new_position(self) -> None:
+        _, r_cost = compute_reward_vector(
+            action=0,  # FORWARD
+            block_mined=None,
+            turtle=_FakeTurtle(fuel=100),
+            max_fuel=500,
+            is_new_position=True,
+        )
+        np.testing.assert_almost_equal(
+            r_cost[5], COST_WEIGHTS["exploration_bonus"],
+        )
+        assert r_cost[5] > 0
+
+    def test_no_exploration_bonus_when_revisiting(self) -> None:
+        _, r_cost = compute_reward_vector(
+            action=0,  # FORWARD
+            block_mined=None,
+            turtle=_FakeTurtle(fuel=100),
+            max_fuel=500,
+            is_new_position=False,
+        )
+        assert r_cost[5] == 0.0
+
+    def test_exploration_bonus_default_false(self) -> None:
+        """Not passing is_new_position gives no bonus."""
+        _, r_cost = compute_reward_vector(
+            action=0,
+            block_mined=None,
+            turtle=_FakeTurtle(fuel=100),
+            max_fuel=500,
+        )
+        assert r_cost[5] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +211,7 @@ class TestScalarization:
         # Diamond mined
         r_ore = np.zeros(NUM_ORE_TYPES, dtype=np.float32)
         r_ore[diamond_idx] = ORE_BASE_VALUES[BlockType.DIAMOND_ORE]
-        r_cost = np.array([-0.005, 0, 0, 0, -0.001], dtype=np.float32)
+        r_cost = np.array([-0.005, 0, 0, 0, -0.001, 0], dtype=np.float32)
 
         reward_diamond_pref = PreferenceManager.scalarize(
             w_diamond, r_ore, r_cost,
@@ -187,7 +230,7 @@ class TestScalarization:
         r_ore[0] = 1.0
         r_ore[1] = 2.0
         r_cost = np.array(
-            [-0.01, -0.005, 0, 0, -0.001], dtype=np.float32,
+            [-0.01, -0.005, 0, 0, -0.001, 0], dtype=np.float32,
         )
 
         expected = (
@@ -203,7 +246,7 @@ class TestScalarization:
         w_ore[diamond_idx] = 1.0
         r_ore = np.zeros(NUM_ORE_TYPES, dtype=np.float32)
         r_cost = np.array(
-            [-0.01, 0, 0, 0, -0.001], dtype=np.float32,
+            [-0.01, 0, 0, 0, -0.001, 0], dtype=np.float32,
         )
 
         reward = PreferenceManager.scalarize(w_ore, r_ore, r_cost)

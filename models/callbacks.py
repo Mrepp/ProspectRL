@@ -86,13 +86,24 @@ class MetricsCallback(BaseCallback):
         super().__init__(verbose)
         self._episode_ores: dict[int, list[int]] = {}
         self._episode_rewards: dict[int, list[float]] = {}
+        self._episode_exploration: dict[int, float] = {}
 
     def _on_step(self) -> bool:
         for i, info in enumerate(self.locals.get("infos", [])):
             # Track ore mining
             block_mined = info.get("block_mined")
             if block_mined is not None:
-                self._episode_ores.setdefault(i, []).append(block_mined)
+                self._episode_ores.setdefault(i, []).append(
+                    block_mined,
+                )
+
+            # Accumulate exploration bonus from r_cost[5]
+            r_cost = info.get("r_cost")
+            if r_cost is not None and len(r_cost) > 5:
+                self._episode_exploration[i] = (
+                    self._episode_exploration.get(i, 0.0)
+                    + float(r_cost[5])
+                )
 
             # Check for episode end
             if info.get("terminal_observation") is not None or \
@@ -104,13 +115,25 @@ class MetricsCallback(BaseCallback):
                 step_count = info.get("step", 1)
                 fuel_eff = ore_count / max(step_count, 1)
 
-                self.logger.record("mining/ores_per_episode", ore_count)
-                self.logger.record("mining/fuel_remaining", fuel)
-                self.logger.record("mining/fuel_efficiency", fuel_eff)
-                self.logger.record("mining/episode_steps", step_count)
+                self.logger.record(
+                    "mining/ores_per_episode", ore_count,
+                )
+                self.logger.record(
+                    "mining/fuel_remaining", fuel,
+                )
+                self.logger.record(
+                    "mining/fuel_efficiency", fuel_eff,
+                )
+                self.logger.record(
+                    "mining/episode_steps", step_count,
+                )
                 self.logger.record(
                     "mining/explored_count",
                     info.get("explored_count", 0),
+                )
+                self.logger.record(
+                    "mining/exploration_bonus_total",
+                    self._episode_exploration.pop(i, 0.0),
                 )
 
         return True

@@ -332,8 +332,9 @@ class MinecraftMiningEnv(gym.Env):
             block_mined = self._get_dig_block(action)
             self._turtle.dig_down(self._world)
 
-        # Update explored
+        # Check if this is a new position before updating explored set
         tp = tuple(int(v) for v in self._turtle.position)
+        is_new_position = tp not in self._explored
         self._explored.add(tp)
 
         # Handle infinite fuel
@@ -346,6 +347,7 @@ class MinecraftMiningEnv(gym.Env):
             block_mined=block_mined,
             turtle=self._turtle,
             max_fuel=self._turtle.max_fuel,
+            is_new_position=is_new_position,
         )
         reward = PreferenceManager.scalarize(
             self._preference, r_ore, r_cost,
