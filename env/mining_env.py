@@ -428,10 +428,20 @@ class MinecraftMiningEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def _count_world_ores(self) -> np.ndarray:
-        """Count total ores of each type in the world. Numpy-vectorized."""
+        """Count total ores of each type in the world. Numpy-vectorized.
+
+        Copies the grid once and runs 8 vectorized equality checks.
+        Called only in ``reset()``, not per-step.
+        """
         assert self._world is not None
         counts = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
-        grid = self._world[:, :, :]
+        # Single copy — avoid repeated __getitem__ slicing
+        if hasattr(self._world, '_grid'):
+            grid = self._world._grid
+        elif hasattr(self._world, '_blocks'):
+            grid = self._world._blocks
+        else:
+            grid = self._world[:, :, :]
         for i, ore_bt in enumerate(ORE_TYPES):
             counts[i] = float(np.sum(grid == int(ore_bt)))
         return counts
