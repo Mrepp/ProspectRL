@@ -3,6 +3,9 @@
 Produces separate reward components (harvest delta, adjacent penalty,
 local clear bonus, operational costs) that are later scalarized by the
 preference manager.
+
+All components are scaled to roughly [-1, +1] per step for stable
+VecNormalize statistics and PPO value function learning.
 """
 
 from __future__ import annotations
@@ -27,19 +30,21 @@ _DEFAULT_CFG = RewardConfig()
 
 def _harvest_potential(
     mined: np.ndarray,
-    total: np.ndarray,
+    reference_total: float,
     preference: np.ndarray,
     kappa: float,
     epsilon: float,
 ) -> float:
-    """Compute Φ(t) = sum_i[ w_i * (1 - exp(-mined_i / (κ * total_i + ε))) ].
+    """Compute Φ(t) = sum_i[ w_i * (1 - exp(-mined_i / (κ * ref + ε))) ].
 
     Parameters
     ----------
     mined:
         Shape ``(NUM_ORE_TYPES,)`` — cumulative ores mined per type.
-    total:
-        Shape ``(NUM_ORE_TYPES,)`` — total ores per type in the world.
+    reference_total:
+        Fixed reference ore count per type for the saturation
+        denominator.  Using a fixed value (instead of per-world
+        counts) eliminates episode-to-episode reward variance.
     preference:
         Shape ``(NUM_ORE_TYPES,)`` — preference weights (sum to 1).
     kappa:
@@ -51,7 +56,7 @@ def _harvest_potential(
     -------
     Potential value in [0, 1].
     """
-    denom = kappa * total + epsilon
+    denom = kappa * reference_total + epsilon
     f_values = 1.0 - np.exp(-mined / denom)
     return float(np.dot(preference, f_values))
 
@@ -62,7 +67,7 @@ def compute_reward_components(
     turtle: object,
     max_fuel: int,
     preference: np.ndarray,
-    world_ore_counts: np.ndarray,
+    reference_total: float,
     mined_ore_counts: np.ndarray,
     prev_potential: float,
     adjacent_desired_weight: float,
@@ -85,8 +90,8 @@ def compute_reward_components(
         Maximum fuel capacity.
     preference:
         Shape ``(NUM_ORE_TYPES,)`` — episode preference vector.
-    world_ore_counts:
-        Shape ``(NUM_ORE_TYPES,)`` — total ores per type at episode start.
+    reference_total:
+        Fixed reference ore count per type (replaces per-world counts).
     mined_ore_counts:
         Shape ``(NUM_ORE_TYPES,)`` — running mined counts, **mutated in-place**.
     prev_potential:
@@ -106,13 +111,13 @@ def compute_reward_components(
     Returns
     -------
     r_harvest:
-        Potential delta for this step.
+        Potential delta + maintenance bonus for this step.
     r_adjacent:
         Adjacent ore miss penalty (negative or zero).
     r_clear:
         Local clear bonus (positive or zero).
     r_ops:
-        Operational costs (fuel/death/time penalties).
+        Operational costs (fuel curve + time penalty).
     new_potential:
         Updated Φ(t) for state tracking.
     new_skip_count:
@@ -130,15 +135,18 @@ def compute_reward_components(
             mined_desired = True
             mined_weight = float(preference[idx])
 
-    # --- Component 1: Harvest potential delta ---
+    # --- Component 1: Harvest potential delta + maintenance bonus ---
     new_potential = _harvest_potential(
         mined_ore_counts,
-        world_ore_counts,
+        reference_total,
         preference,
         cfg.harvest_kappa,
         cfg.harvest_epsilon,
     )
-    r_harvest = new_potential - prev_potential
+    r_harvest = (
+        (new_potential - prev_potential)
+        + cfg.potential_maintenance_bonus * new_potential
+    )
 
     # --- Component 2: Adjacent ore penalty (softened) ---
     raw_miss = max(0.0, adjacent_desired_weight - mined_weight)
@@ -149,9 +157,11 @@ def compute_reward_components(
     else:
         r_adjacent = 0.0
 
-    # --- Update consecutive skip count ---
+    # --- Update consecutive skip count (capped) ---
     if adjacent_desired_weight > 0.0 and not mined_desired:
-        new_skip_count = consecutive_skip_count + 1
+        new_skip_count = min(
+            consecutive_skip_count + 1, cfg.adjacent_skip_cap,
+        )
     else:
         new_skip_count = 0
 
@@ -163,12 +173,14 @@ def compute_reward_components(
     ):
         r_clear = cfg.local_clear_bonus
 
-    # --- Component 4: Operational costs ---
-    fuel_pen = (
-        cfg.fuel_penalty if turtle.fuel < 0.1 * max_fuel else 0.0
-    )
-    death_pen = cfg.death_penalty if turtle.fuel == 0 else 0.0
+    # --- Component 4: Operational costs (progressive fuel curve) ---
+    fuel_fraction = turtle.fuel / max(max_fuel, 1)
+    if fuel_fraction < cfg.fuel_critical_threshold:
+        progress = 1.0 - (fuel_fraction / cfg.fuel_critical_threshold)
+        fuel_pen = cfg.fuel_critical_penalty * (progress ** 2)
+    else:
+        fuel_pen = 0.0
     time_pen = cfg.time_penalty
-    r_ops = fuel_pen + death_pen + time_pen
+    r_ops = fuel_pen + time_pen
 
     return r_harvest, r_adjacent, r_clear, r_ops, new_potential, new_skip_count

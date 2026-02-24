@@ -54,6 +54,7 @@ def make_training_env(
         norm_obs_keys=["scalars"],
         norm_reward=True,
         clip_obs=10.0,
+        clip_reward=10.0,
     )
 
 
@@ -99,7 +100,10 @@ def create_ppo_model(
         "normalize_advantage": ppo.normalize_advantage,
         "policy_kwargs": {
             "features_extractor_class": MiningFeatureExtractor,
-            "net_arch": {"pi": [64, 64], "vf": [64, 64]},
+            "net_arch": {
+                "pi": ppo.pi_net_arch,
+                "vf": ppo.vf_net_arch,
+            },
         },
         "seed": seed,
         "verbose": 1,

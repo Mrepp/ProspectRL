@@ -231,7 +231,7 @@ class MinecraftMiningEnv(gym.Env):
         self._max_steps: int = self._stage_cfg.max_episode_steps
 
         # Reward state (initialised in reset)
-        self._world_ore_counts = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        self._reference_total: float = 0.0
         self._mined_ore_counts = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
         self._potential: float = 0.0
         self._prev_adjacent_weight: float = 0.0
@@ -304,8 +304,15 @@ class MinecraftMiningEnv(gym.Env):
 
         self._step_count = 0
 
-        # Reward state
-        self._world_ore_counts = self._count_world_ores()
+        # Reward state — reference total from stage config, not per-world
+        ws = self._stage_cfg.world_size
+        volume = ws[0] * ws[1] * ws[2]
+        self._reference_total = (
+            volume
+            * 0.02
+            * self._stage_cfg.ore_density_multiplier
+            / NUM_ORE_TYPES
+        )
         self._mined_ore_counts = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
         self._potential = 0.0
         self._prev_adjacent_weight = 0.0
@@ -381,7 +388,7 @@ class MinecraftMiningEnv(gym.Env):
             turtle=self._turtle,
             max_fuel=self._turtle.max_fuel,
             preference=self._preference,
-            world_ore_counts=self._world_ore_counts,
+            reference_total=self._reference_total,
             mined_ore_counts=self._mined_ore_counts,
             prev_potential=self._potential,
             adjacent_desired_weight=adj_weight_pre,
@@ -393,12 +400,6 @@ class MinecraftMiningEnv(gym.Env):
         reward = PreferenceManager.scalarize(
             r_harvest, r_adjacent, r_clear, r_ops,
         )
-
-        # End-of-episode bonus
-        if terminated or truncated:
-            reward += PreferenceManager.compute_episode_bonus(
-                self._potential,
-            )
 
         # Update state for next step
         self._prev_adjacent_weight = adj_weight_post
@@ -426,25 +427,6 @@ class MinecraftMiningEnv(gym.Env):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _count_world_ores(self) -> np.ndarray:
-        """Count total ores of each type in the world. Numpy-vectorized.
-
-        Copies the grid once and runs 8 vectorized equality checks.
-        Called only in ``reset()``, not per-step.
-        """
-        assert self._world is not None
-        counts = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
-        # Single copy — avoid repeated __getitem__ slicing
-        if hasattr(self._world, '_grid'):
-            grid = self._world._grid
-        elif hasattr(self._world, '_blocks'):
-            grid = self._world._blocks
-        else:
-            grid = self._world[:, :, :]
-        for i, ore_bt in enumerate(ORE_TYPES):
-            counts[i] = float(np.sum(grid == int(ore_bt)))
-        return counts
 
     def _compute_adjacent_desired_weight(self) -> float:
         """Sum preference weights of desired ores adjacent to the turtle.

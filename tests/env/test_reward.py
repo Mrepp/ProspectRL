@@ -35,19 +35,8 @@ def _make_pref(index: int, weight: float = 1.0) -> np.ndarray:
     return w
 
 
-def _make_world_counts(**kwargs: float) -> np.ndarray:
-    """Create world ore counts from keyword args like coal=100."""
-    name_to_idx = {
-        "coal": 0, "iron": 1, "gold": 2, "diamond": 3,
-        "redstone": 4, "emerald": 5, "lapis": 6, "copper": 7,
-    }
-    counts = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
-    for name, val in kwargs.items():
-        counts[name_to_idx[name]] = val
-    return counts
-
-
 _CFG = RewardConfig()
+_REF_TOTAL = _CFG.harvest_reference_total
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +47,6 @@ _CFG = RewardConfig()
 class TestPotentialHarvest:
     def test_potential_increases_on_mine(self) -> None:
         pref = _make_pref(3)  # diamond
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         r_harvest, _, _, _, new_pot, _ = compute_reward_components(
@@ -67,7 +55,7 @@ class TestPotentialHarvest:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -80,7 +68,6 @@ class TestPotentialHarvest:
 
     def test_potential_zero_when_no_mine(self) -> None:
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         r_harvest, _, _, _, new_pot, _ = compute_reward_components(
@@ -89,7 +76,7 @@ class TestPotentialHarvest:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -103,7 +90,6 @@ class TestPotentialHarvest:
     def test_potential_diminishing_returns(self) -> None:
         """Second ore of same type gives smaller delta than first."""
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         # Mine first diamond
@@ -113,7 +99,7 @@ class TestPotentialHarvest:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -128,7 +114,7 @@ class TestPotentialHarvest:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=pot1,
             adjacent_desired_weight=0.0,
@@ -139,10 +125,9 @@ class TestPotentialHarvest:
         assert r2 < r1
         assert pot2 > pot1
 
-    def test_potential_safe_when_total_zero(self) -> None:
-        """Ore type with total=0 contributes 0, not NaN."""
-        pref = _make_pref(3)  # diamond
-        world = _make_world_counts(diamond=0)  # no diamonds in world
+    def test_potential_safe_when_reference_small(self) -> None:
+        """Small reference total does not produce NaN."""
+        pref = _make_pref(3)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         r_harvest, _, _, _, new_pot, _ = compute_reward_components(
@@ -151,7 +136,7 @@ class TestPotentialHarvest:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=0.0,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -164,8 +149,6 @@ class TestPotentialHarvest:
 
     def test_potential_weighted_by_preference(self) -> None:
         """Higher-preference ore gives larger delta."""
-        world = _make_world_counts(coal=100, diamond=100)
-
         # Mine coal with coal pref=0.8
         pref_coal = np.zeros(NUM_ORE_TYPES, dtype=np.float32)
         pref_coal[0] = 0.8
@@ -177,7 +160,7 @@ class TestPotentialHarvest:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref_coal,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined1,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -186,7 +169,7 @@ class TestPotentialHarvest:
             consecutive_skip_count=0,
         )
 
-        # Mine diamond with diamond pref=0.2 (same world)
+        # Mine diamond with diamond pref=0.2 (same pref vector)
         mined2 = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
         r_diamond, _, _, _, _, _ = compute_reward_components(
             action=6,
@@ -194,7 +177,7 @@ class TestPotentialHarvest:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref_coal,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined2,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -206,25 +189,64 @@ class TestPotentialHarvest:
         assert r_coal > r_diamond
 
     def test_potential_bounded(self) -> None:
-        """Potential is in [0, 1] since w sums to 1 and f in [0, 1]."""
+        """Potential is in [0, 1] since w sums to 1 and f in [0,1]."""
         pref = _make_pref(0)
-        world = _make_world_counts(coal=10)
-        mined = np.array([10.0] + [0.0] * 7, dtype=np.float64)
+        mined = np.array(
+            [10.0] + [0.0] * 7, dtype=np.float64,
+        )
 
         pot = _harvest_potential(
-            mined, world, pref, _CFG.harvest_kappa, _CFG.harvest_epsilon,
+            mined, _REF_TOTAL, pref,
+            _CFG.harvest_kappa, _CFG.harvest_epsilon,
         )
         assert 0.0 <= pot <= 1.0
 
     def test_kappa_controls_saturation(self) -> None:
         """Lower kappa means faster saturation."""
         pref = _make_pref(0)
-        world = _make_world_counts(coal=100)
-        mined = np.array([40.0] + [0.0] * 7, dtype=np.float64)
+        mined = np.array(
+            [40.0] + [0.0] * 7, dtype=np.float64,
+        )
 
-        pot_low_k = _harvest_potential(mined, world, pref, 0.2, 1.0)
-        pot_high_k = _harvest_potential(mined, world, pref, 0.8, 1.0)
+        pot_low_k = _harvest_potential(
+            mined, _REF_TOTAL, pref, 0.2, 1.0,
+        )
+        pot_high_k = _harvest_potential(
+            mined, _REF_TOTAL, pref, 0.8, 1.0,
+        )
         assert pot_low_k > pot_high_k
+
+    def test_maintenance_bonus_in_harvest(self) -> None:
+        """r_harvest includes per-step maintenance bonus."""
+        pref = _make_pref(3)
+        # Pre-populate some mined ores to have nonzero potential
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        mined[3] = 10.0  # 10 diamonds already mined
+
+        pot_before = _harvest_potential(
+            mined, _REF_TOTAL, pref,
+            _CFG.harvest_kappa, _CFG.harvest_epsilon,
+        )
+        assert pot_before > 0.0
+
+        # Take a no-op step (no mining)
+        r_harvest, _, _, _, _, _ = compute_reward_components(
+            action=0,
+            block_mined=None,
+            turtle=_FakeTurtle(fuel=100),
+            max_fuel=500,
+            preference=pref,
+            reference_total=_REF_TOTAL,
+            mined_ore_counts=mined,
+            prev_potential=pot_before,
+            adjacent_desired_weight=0.0,
+            adjacent_desired_weight_post=0.0,
+            prev_adjacent_weight=0.0,
+            consecutive_skip_count=0,
+        )
+        # Delta is 0, but maintenance bonus > 0
+        expected = _CFG.potential_maintenance_bonus * pot_before
+        assert r_harvest == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +258,6 @@ class TestAdjacentPenalty:
     def test_penalty_when_adjacent_desired_ore(self) -> None:
         """Penalty fires when adjacent to desired ore, not mining."""
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, r_adj, _, _, _, _ = compute_reward_components(
@@ -245,7 +266,7 @@ class TestAdjacentPenalty:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=1.0,  # diamond adjacent
@@ -257,7 +278,6 @@ class TestAdjacentPenalty:
 
     def test_no_penalty_when_no_adjacent(self) -> None:
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, r_adj, _, _, _, _ = compute_reward_components(
@@ -266,7 +286,7 @@ class TestAdjacentPenalty:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -279,7 +299,6 @@ class TestAdjacentPenalty:
     def test_penalty_reduced_when_mining(self) -> None:
         """Mining a desired ore subtracts its weight from penalty."""
         pref = _make_pref(3)  # diamond w=1.0
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, r_adj, _, _, _, _ = compute_reward_components(
@@ -288,7 +307,7 @@ class TestAdjacentPenalty:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=1.0,  # 1 adjacent diamond
@@ -296,13 +315,12 @@ class TestAdjacentPenalty:
             prev_adjacent_weight=0.0,
             consecutive_skip_count=0,
         )
-        # mined_weight = 1.0, adj = 1.0 → raw_miss = 0 → no penalty
+        # mined_weight=1.0, adj=1.0 → raw_miss=0 → no penalty
         assert r_adj == 0.0
 
     def test_tanh_saturates_in_dense_veins(self) -> None:
         """Penalty is bounded even with many adjacent ores."""
         pref = _make_pref(0)
-        world = _make_world_counts(coal=200)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         # 5 adjacent coal ores, each w=1.0 → sum=5.0
@@ -312,7 +330,7 @@ class TestAdjacentPenalty:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=5.0,
@@ -327,7 +345,6 @@ class TestAdjacentPenalty:
     def test_skip_decay_increases_penalty(self) -> None:
         """Consecutive skips amplify penalty via lambda."""
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, r_skip0, _, _, _, _ = compute_reward_components(
@@ -336,7 +353,7 @@ class TestAdjacentPenalty:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined.copy(),
             prev_potential=0.0,
             adjacent_desired_weight=1.0,
@@ -350,7 +367,7 @@ class TestAdjacentPenalty:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined.copy(),
             prev_potential=0.0,
             adjacent_desired_weight=1.0,
@@ -360,10 +377,31 @@ class TestAdjacentPenalty:
         )
         assert r_skip5 < r_skip0  # more negative
 
+    def test_skip_count_caps_at_max(self) -> None:
+        """Skip count never exceeds adjacent_skip_cap."""
+        pref = _make_pref(3)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        cap = _CFG.adjacent_skip_cap
+
+        _, _, _, _, _, new_skip = compute_reward_components(
+            action=0,
+            block_mined=None,
+            turtle=_FakeTurtle(fuel=100),
+            max_fuel=500,
+            preference=pref,
+            reference_total=_REF_TOTAL,
+            mined_ore_counts=mined,
+            prev_potential=0.0,
+            adjacent_desired_weight=1.0,
+            adjacent_desired_weight_post=1.0,
+            prev_adjacent_weight=0.0,
+            consecutive_skip_count=cap,
+        )
+        assert new_skip == cap  # stays at cap, does not exceed
+
     def test_skip_count_resets_on_mine(self) -> None:
         """Skip count resets to 0 when mining a desired ore."""
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, _, _, _, _, new_skip = compute_reward_components(
@@ -372,7 +410,7 @@ class TestAdjacentPenalty:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=1.0,
@@ -385,7 +423,6 @@ class TestAdjacentPenalty:
     def test_skip_count_resets_when_no_adjacent(self) -> None:
         """Skip count resets when no adjacent desired ore."""
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, _, _, _, _, new_skip = compute_reward_components(
@@ -394,7 +431,7 @@ class TestAdjacentPenalty:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -407,18 +444,16 @@ class TestAdjacentPenalty:
     def test_no_penalty_for_nonpreferred_ore(self) -> None:
         """Adjacent ore with w_i=0 is ignored."""
         pref = _make_pref(3)  # only diamond
-        world = _make_world_counts(coal=100, diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         # adjacent_desired_weight should be 0 if only coal is adjacent
-        # (coal has pref=0); env computes this, but here we pass 0
         _, r_adj, _, _, _, _ = compute_reward_components(
             action=0,
             block_mined=None,
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -438,7 +473,6 @@ class TestLocalClearBonus:
     def test_bonus_when_area_cleared(self) -> None:
         """Fires when prev adjacent > 0 and post adjacent == 0."""
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, _, r_clear, _, _, _ = compute_reward_components(
@@ -447,7 +481,7 @@ class TestLocalClearBonus:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=1.0,
@@ -459,7 +493,6 @@ class TestLocalClearBonus:
 
     def test_no_bonus_when_ores_remain(self) -> None:
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, _, r_clear, _, _, _ = compute_reward_components(
@@ -468,7 +501,7 @@ class TestLocalClearBonus:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=2.0,
@@ -480,7 +513,6 @@ class TestLocalClearBonus:
 
     def test_no_bonus_when_area_was_empty(self) -> None:
         pref = _make_pref(3)
-        world = _make_world_counts(diamond=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, _, r_clear, _, _, _ = compute_reward_components(
@@ -489,7 +521,7 @@ class TestLocalClearBonus:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -501,14 +533,13 @@ class TestLocalClearBonus:
 
 
 # ---------------------------------------------------------------------------
-# Operational Costs
+# Operational Costs (Progressive Fuel Curve)
 # ---------------------------------------------------------------------------
 
 
 class TestOperationalCosts:
     def test_time_penalty_always_present(self) -> None:
         pref = _make_pref(0)
-        world = _make_world_counts(coal=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         _, _, _, r_ops, _, _ = compute_reward_components(
@@ -517,7 +548,7 @@ class TestOperationalCosts:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -527,18 +558,22 @@ class TestOperationalCosts:
         )
         assert r_ops == pytest.approx(_CFG.time_penalty)
 
-    def test_fuel_penalty_when_low(self) -> None:
+    def test_progressive_fuel_penalty(self) -> None:
+        """Fuel penalty ramps quadratically below threshold."""
         pref = _make_pref(0)
-        world = _make_world_counts(coal=50)
-        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        max_fuel = 500
+        threshold = _CFG.fuel_critical_threshold  # 0.2
 
-        _, _, _, r_ops, _, _ = compute_reward_components(
+        # At 20% fuel (boundary): no penalty
+        fuel_at_boundary = int(threshold * max_fuel)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        _, _, _, r_ops_20, _, _ = compute_reward_components(
             action=0,
             block_mined=None,
-            turtle=_FakeTurtle(fuel=10),  # < 10% of 500
-            max_fuel=500,
+            turtle=_FakeTurtle(fuel=fuel_at_boundary),
+            max_fuel=max_fuel,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined,
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -546,37 +581,48 @@ class TestOperationalCosts:
             prev_adjacent_weight=0.0,
             consecutive_skip_count=0,
         )
-        expected = _CFG.fuel_penalty + _CFG.time_penalty
-        assert r_ops == pytest.approx(expected)
+        assert r_ops_20 == pytest.approx(_CFG.time_penalty)
 
-    def test_death_penalty_at_zero(self) -> None:
-        pref = _make_pref(0)
-        world = _make_world_counts(coal=50)
-        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        # At 10% fuel: progress=0.5, penalty = -1.0 * 0.25
+        fuel_at_10 = int(0.1 * max_fuel)
+        _, _, _, r_ops_10, _, _ = compute_reward_components(
+            action=0,
+            block_mined=None,
+            turtle=_FakeTurtle(fuel=fuel_at_10),
+            max_fuel=max_fuel,
+            preference=pref,
+            reference_total=_REF_TOTAL,
+            mined_ore_counts=mined.copy(),
+            prev_potential=0.0,
+            adjacent_desired_weight=0.0,
+            adjacent_desired_weight_post=0.0,
+            prev_adjacent_weight=0.0,
+            consecutive_skip_count=0,
+        )
+        expected_10 = _CFG.fuel_critical_penalty * 0.25 + _CFG.time_penalty
+        assert r_ops_10 == pytest.approx(expected_10, abs=0.01)
 
-        _, _, _, r_ops, _, _ = compute_reward_components(
+        # At 0% fuel: full penalty
+        _, _, _, r_ops_0, _, _ = compute_reward_components(
             action=0,
             block_mined=None,
             turtle=_FakeTurtle(fuel=0),
-            max_fuel=500,
+            max_fuel=max_fuel,
             preference=pref,
-            world_ore_counts=world,
-            mined_ore_counts=mined,
+            reference_total=_REF_TOTAL,
+            mined_ore_counts=mined.copy(),
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
             adjacent_desired_weight_post=0.0,
             prev_adjacent_weight=0.0,
             consecutive_skip_count=0,
         )
-        expected = (
-            _CFG.fuel_penalty + _CFG.death_penalty + _CFG.time_penalty
-        )
-        assert r_ops == pytest.approx(expected)
+        expected_0 = _CFG.fuel_critical_penalty + _CFG.time_penalty
+        assert r_ops_0 == pytest.approx(expected_0)
 
     def test_no_movement_or_dig_cost(self) -> None:
         """Movement and dig costs no longer exist."""
         pref = _make_pref(0)
-        world = _make_world_counts(coal=50)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
         # FORWARD action — should only have time_penalty
@@ -586,7 +632,7 @@ class TestOperationalCosts:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined.copy(),
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -601,7 +647,7 @@ class TestOperationalCosts:
             turtle=_FakeTurtle(fuel=100),
             max_fuel=500,
             preference=pref,
-            world_ore_counts=world,
+            reference_total=_REF_TOTAL,
             mined_ore_counts=mined.copy(),
             prev_potential=0.0,
             adjacent_desired_weight=0.0,
@@ -626,13 +672,102 @@ class TestScalarization:
             r_clear=0.2,
             r_ops=-0.001,
         )
-        expected = _CFG.harvest_alpha * 0.01 + (-0.05) + 0.2 + (-0.001)
+        expected = (
+            _CFG.harvest_alpha * 0.01
+            + (-0.05) + 0.2 + (-0.001)
+        )
         assert r == pytest.approx(expected)
 
-    def test_episode_bonus(self) -> None:
+    def test_episode_bonus_deprecated(self) -> None:
+        """Episode bonus is deprecated and returns 0."""
         bonus = PreferenceManager.compute_episode_bonus(0.7)
-        expected = _CFG.episode_bonus_gamma * 0.7
-        assert bonus == pytest.approx(expected)
+        assert bonus == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Reward Range Bounds
+# ---------------------------------------------------------------------------
+
+
+class TestRewardBounds:
+    def test_reward_range_bounded(self) -> None:
+        """All per-step rewards stay within [-3, +3]."""
+        rng = np.random.default_rng(42)
+        pref = _make_pref(0)
+
+        for _ in range(100):
+            mined = rng.random(NUM_ORE_TYPES) * 50
+            mined = mined.astype(np.float64)
+            fuel = int(rng.integers(0, 500))
+            adj_w = float(rng.random() * 3)
+            skip = int(rng.integers(0, 20))
+
+            action = int(rng.integers(0, 9))
+            block = (
+                int(BlockType.COAL_ORE)
+                if action >= 6 else None
+            )
+
+            r_h, r_a, r_c, r_o, _, _ = compute_reward_components(
+                action=action,
+                block_mined=block,
+                turtle=_FakeTurtle(fuel=fuel),
+                max_fuel=500,
+                preference=pref,
+                reference_total=_REF_TOTAL,
+                mined_ore_counts=mined.copy(),
+                prev_potential=float(rng.random()),
+                adjacent_desired_weight=adj_w,
+                adjacent_desired_weight_post=adj_w * 0.5,
+                prev_adjacent_weight=adj_w,
+                consecutive_skip_count=skip,
+            )
+            total = PreferenceManager.scalarize(
+                r_h, r_a, r_c, r_o,
+            )
+            assert -3.0 <= total <= 3.0, (
+                f"Reward {total} out of bounds: "
+                f"h={r_h}, a={r_a}, c={r_c}, o={r_o}"
+            )
+
+    def test_reference_total_deterministic(self) -> None:
+        """Same mining on different reference totals gives same result
+        when using a fixed reference."""
+        pref = _make_pref(3)
+
+        mined1 = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        r1, _, _, _, _, _ = compute_reward_components(
+            action=6,
+            block_mined=int(BlockType.DIAMOND_ORE),
+            turtle=_FakeTurtle(fuel=100),
+            max_fuel=500,
+            preference=pref,
+            reference_total=_REF_TOTAL,
+            mined_ore_counts=mined1,
+            prev_potential=0.0,
+            adjacent_desired_weight=0.0,
+            adjacent_desired_weight_post=0.0,
+            prev_adjacent_weight=0.0,
+            consecutive_skip_count=0,
+        )
+
+        mined2 = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        r2, _, _, _, _, _ = compute_reward_components(
+            action=6,
+            block_mined=int(BlockType.DIAMOND_ORE),
+            turtle=_FakeTurtle(fuel=100),
+            max_fuel=500,
+            preference=pref,
+            reference_total=_REF_TOTAL,
+            mined_ore_counts=mined2,
+            prev_potential=0.0,
+            adjacent_desired_weight=0.0,
+            adjacent_desired_weight_post=0.0,
+            prev_adjacent_weight=0.0,
+            consecutive_skip_count=0,
+        )
+
+        assert r1 == pytest.approx(r2)
 
 
 # ---------------------------------------------------------------------------

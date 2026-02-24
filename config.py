@@ -371,26 +371,31 @@ class RewardConfig:
     """Potential-based harvest efficiency reward system.
 
     Uses an exponential potential function for smooth, stable PPO gradients:
-    f(mined, total) = 1 - exp(-mined / (kappa * total + epsilon))
+    f(mined, total) = 1 - exp(-mined / (kappa * reference_total + epsilon))
+
+    All components are scaled to roughly [-1, +1] per step for stable
+    VecNormalize statistics and value function learning.
     """
 
     # Potential-based harvest
-    harvest_alpha: float = 8.0         # scale per-step potential delta
-    episode_bonus_gamma: float = 3.0   # scale end-of-episode potential bonus
+    harvest_alpha: float = 1.0         # scale per-step potential delta
     harvest_kappa: float = 0.4         # exponential saturation parameter
     harvest_epsilon: float = 1.0       # prevents division by zero
+    harvest_reference_total: float = 400.0  # fixed ore count for saturation denominator
+    potential_maintenance_bonus: float = 0.005  # per-step bonus proportional to potential
 
     # Adjacent ore penalty (softened with tanh)
-    adjacent_penalty_beta: float = 0.05  # base penalty weight
+    adjacent_penalty_beta: float = 0.5   # base penalty weight
     adjacent_skip_lambda: float = 0.1    # opportunity cost decay per consecutive skip
+    adjacent_skip_cap: int = 10          # maximum consecutive skip count
 
     # Local clear bonus
-    local_clear_bonus: float = 0.2     # bonus when all adjacent desired ores cleared
+    local_clear_bonus: float = 0.5     # bonus when all adjacent desired ores cleared
 
-    # Operational costs
-    fuel_penalty: float = -0.1         # per step when fuel < 10% max
-    death_penalty: float = -10.0       # episode termination from fuel=0
-    time_penalty: float = -0.001       # per step, encourages efficiency
+    # Operational costs — progressive fuel curve replaces hard death penalty
+    fuel_critical_threshold: float = 0.2  # fuel fraction below which penalty ramps
+    fuel_critical_penalty: float = -1.0   # max penalty per step at fuel=0
+    time_penalty: float = -0.005       # per step, encourages efficiency
 
 
 # ---------------------------------------------------------------------------
@@ -548,9 +553,11 @@ class PPOConfig:
     gae_lambda: float = 0.95
     clip_range: float = 0.2
     ent_coef: float = 0.01
-    vf_coef: float = 0.5
+    vf_coef: float = 0.75
     max_grad_norm: float = 0.5
     normalize_advantage: bool = True
+    pi_net_arch: list[int] = field(default_factory=lambda: [64, 64])
+    vf_net_arch: list[int] = field(default_factory=lambda: [128, 128])
 
 
 # ---------------------------------------------------------------------------

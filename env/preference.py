@@ -86,6 +86,8 @@ class PreferenceManager:
         potential: float,
         reward_config: RewardConfig | None = None,
     ) -> float:
-        """End-of-episode bonus proportional to final harvest potential."""
-        cfg = reward_config or _DEFAULT_CFG
-        return cfg.episode_bonus_gamma * potential
+        """Deprecated: episode bonus is now distributed per-step.
+
+        Kept for backward compatibility. Always returns 0.0.
+        """
+        return 0.0
