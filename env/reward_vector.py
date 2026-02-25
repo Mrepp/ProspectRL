@@ -194,19 +194,23 @@ def compute_stage1_reward_components(
     mined_ore_counts: np.ndarray,
     cumulative_waste_count: int,
     is_new_position: bool,
+    turtle_y: int = 0,
+    ore_y_range: tuple[float, float] = (0.0, 39.0),
+    world_height: int = 40,
     stage1_config: Stage1RewardConfig | None = None,
 ) -> tuple[float, float, float, float, int]:
     """Compute Stage 1 reward components.
 
-    Stage 1 uses immediate per-ore rewards with a soft-then-sharp
-    waste penalty instead of the potential-based system.
+    Stage 1 uses immediate per-ore rewards with a Y-distance
+    penalty that increases the farther the turtle is from the
+    target ore's spawn range.
 
     Returns
     -------
     r_harvest:
         Per-ore immediate reward (positive for target ore).
     r_adjacent:
-        Always 0.0 for Stage 1.
+        Y-distance penalty (negative when outside ore range).
     r_clear:
         Exploration bonus (positive for new cells).
     r_ops:
@@ -246,8 +250,17 @@ def compute_stage1_reward_components(
             )
             r_ops = -cfg.waste_beta * ratio ** cfg.waste_alpha
 
-    # Adjacent penalty disabled for Stage 1
-    r_adjacent = 0.0
+    # Y-distance penalty: increases with distance from ore range
+    y_min, y_max = ore_y_range
+    if turtle_y < y_min:
+        y_dist = y_min - turtle_y
+    elif turtle_y > y_max:
+        y_dist = turtle_y - y_max
+    else:
+        y_dist = 0.0
+    r_adjacent = (
+        -cfg.y_penalty_scale * y_dist / max(world_height, 1)
+    )
 
     # Exploration bonus
     r_clear = cfg.exploration_bonus if is_new_position else 0.0

@@ -336,6 +336,30 @@ FILLER_SPAWN_CONFIGS: list[OreSpawnConfig] = [
 ORE_DISTRIBUTIONS: list[OreSpawnConfig] = ORE_SPAWN_CONFIGS
 
 
+def get_ore_y_ranges(world_height: int) -> list[tuple[float, float]]:
+    """Return (y_min, y_max) simulation-Y range per ore type index.
+
+    Takes the union of all spawn configs for each ore type (widest
+    min to widest max), converted to simulation coordinates.
+    """
+    ranges: list[tuple[float, float]] = []
+    for ore_bt in ORE_TYPES:
+        y_lo = float("inf")
+        y_hi = float("-inf")
+        for cfg in ORE_SPAWN_CONFIGS:
+            if cfg.block_type != ore_bt:
+                continue
+            sim_min = (cfg.y_min_mc - MC_Y_MIN) / MC_Y_RANGE * world_height
+            sim_max = (cfg.y_max_mc - MC_Y_MIN) / MC_Y_RANGE * world_height
+            y_lo = min(y_lo, sim_min)
+            y_hi = max(y_hi, sim_max)
+        # Clamp to world bounds
+        y_lo = max(0.0, y_lo)
+        y_hi = min(float(world_height - 1), y_hi)
+        ranges.append((y_lo, y_hi))
+    return ranges
+
+
 # ---------------------------------------------------------------------------
 # Reward Configuration
 # ---------------------------------------------------------------------------
@@ -400,29 +424,33 @@ class RewardConfig:
 
 @dataclass
 class Stage1RewardConfig:
-    """Stage 1 reward: immediate ore mining with soft-then-sharp waste penalty.
+    """Stage 1 reward: maximize target ore mining.
 
     Designed for one-shot performance in mining all target ores.
-    No fuel constraints, no adjacent penalty, no time penalty.
+    No fuel constraints. Y-distance penalty guides the agent
+    toward the correct depth for its target ore type.
     """
 
     # Per-target-ore immediate reward
-    per_ore_reward: float = 0.1
+    per_ore_reward: float = 1.0
 
-    # Terminal completion bonus: completion_scale * (target_mined / target_in_world)
-    completion_scale: float = 15.0
+    # Terminal completion bonus
+    completion_scale: float = 20.0
 
-    # Waste penalty (soft-then-sharp quadratic)
-    # Per non-target dig: -waste_beta * min(1, cumul_waste / waste_ramp)^waste_alpha
-    waste_beta: float = 0.05        # max penalty per waste-dig step
-    waste_ramp: int = 100           # waste count at which penalty reaches full beta
-    waste_alpha: float = 2.0        # exponent (2.0 = quadratic = soft-then-sharp)
+    # Waste penalty (soft — de-emphasized for Stage 1)
+    waste_beta: float = 0.02
+    waste_ramp: int = 100
+    waste_alpha: float = 2.0
 
     # Exploration bonus per new cell visited
-    exploration_bonus: float = 0.02
+    exploration_bonus: float = 0.01
 
-    # Non-target ore penalty multiplier (mining wrong ore counts as 1.5x waste)
+    # Non-target ore penalty multiplier
     non_target_ore_multiplier: float = 1.5
+
+    # Y-distance penalty: per-step cost when outside target
+    # ore's Y range. Scales linearly with distance from range.
+    y_penalty_scale: float = 0.03
 
 
 # ---------------------------------------------------------------------------

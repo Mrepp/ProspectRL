@@ -37,6 +37,7 @@ from prospect_rl.config import (
     SOLID_BLOCKS,
     Action,
     BlockType,
+    get_ore_y_ranges,
 )
 from prospect_rl.env.action_masking import get_action_mask
 from prospect_rl.env.preference import PreferenceManager
@@ -252,6 +253,7 @@ class MinecraftMiningEnv(gym.Env):
         # Stage 1 reward state
         self._cumulative_waste_count: int = 0
         self._total_target_ores_in_world: int = 0
+        self._ore_y_range: tuple[float, float] = (0.0, 39.0)
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -313,6 +315,12 @@ class MinecraftMiningEnv(gym.Env):
             mode=self._preference_mode,
         )
 
+        # Stage 1: resample if target ore doesn't exist in this world
+        if self._is_stage1:
+            self._preference = self._ensure_achievable_preference(
+                self._preference,
+            )
+
         # Explored set
         self._explored = set()
         tp = tuple(int(v) for v in self._turtle.position)
@@ -334,12 +342,13 @@ class MinecraftMiningEnv(gym.Env):
         self._prev_adjacent_weight = 0.0
         self._consecutive_skip_count = 0
 
-        # Stage 1: count target ores and reset waste
+        # Stage 1: count target ores, reset waste, compute Y-range
         if self._is_stage1:
             self._total_target_ores_in_world = (
                 self._count_target_ores()
             )
             self._cumulative_waste_count = 0
+            self._ore_y_range = self._compute_ore_y_range()
 
         obs = self._build_obs()
         info = self._build_info()
@@ -421,6 +430,9 @@ class MinecraftMiningEnv(gym.Env):
                     self._cumulative_waste_count
                 ),
                 is_new_position=is_new_position,
+                turtle_y=int(self._turtle.position[1]),
+                ore_y_range=self._ore_y_range,
+                world_height=self._stage_cfg.world_size[1],
             )
 
             # Terminal completion bonus
@@ -511,6 +523,49 @@ class MinecraftMiningEnv(gym.Env):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _ensure_achievable_preference(
+        self,
+        preference: np.ndarray,
+        max_attempts: int = 20,
+    ) -> np.ndarray:
+        """Resample preference if the target ore has 0 blocks in the world.
+
+        Falls back to the most common ore type after max_attempts.
+        """
+        assert self._world is not None
+        for _ in range(max_attempts):
+            target_ids = [
+                int(ORE_TYPES[i])
+                for i in range(len(ORE_TYPES))
+                if preference[i] > 0
+            ]
+            if target_ids and self._world.count_blocks(target_ids) > 0:
+                return preference
+            preference = self._pref_mgr.sample(
+                mode=self._preference_mode,
+            )
+
+        # Fallback: find the most common ore and target it
+        best_idx = 0
+        best_count = 0
+        for i, ore_bt in enumerate(ORE_TYPES):
+            count = self._world.count_blocks([int(ore_bt)])
+            if count > best_count:
+                best_count = count
+                best_idx = i
+        fallback = np.zeros(len(ORE_TYPES), dtype=np.float32)
+        fallback[best_idx] = 1.0
+        return fallback
+
+    def _compute_ore_y_range(self) -> tuple[float, float]:
+        """Compute the target ore's Y-range for the current preference."""
+        assert self._preference is not None
+        world_h = self._stage_cfg.world_size[1]
+        all_ranges = get_ore_y_ranges(world_h)
+        # For one-hot: single target ore index
+        target_idx = int(np.argmax(self._preference))
+        return all_ranges[target_idx]
 
     def _count_target_ores(self) -> int:
         """Count target ores in the world for the current preference."""

@@ -10,6 +10,7 @@ import json
 import shutil
 from pathlib import Path
 
+from prospect_rl.env.reward_vector import _ORE_INDEX
 from stable_baselines3.common.callbacks import BaseCallback
 
 
@@ -84,17 +85,17 @@ class MetricsCallback(BaseCallback):
 
     def __init__(self, verbose: int = 0) -> None:
         super().__init__(verbose)
-        self._episode_ores: dict[int, list[int]] = {}
+        self._episode_blocks: dict[int, list[int]] = {}
         self._episode_harvest: dict[int, list[float]] = {}
         self._episode_adjacent: dict[int, list[float]] = {}
         self._episode_clears: dict[int, int] = {}
 
     def _on_step(self) -> bool:
         for i, info in enumerate(self.locals.get("infos", [])):
-            # Track ore mining
+            # Track block mining
             block_mined = info.get("block_mined")
             if block_mined is not None:
-                self._episode_ores.setdefault(i, []).append(
+                self._episode_blocks.setdefault(i, []).append(
                     block_mined,
                 )
 
@@ -117,8 +118,11 @@ class MetricsCallback(BaseCallback):
             # Check for episode end
             if info.get("terminal_observation") is not None or \
                self.locals.get("dones", [False] * (i + 1))[i]:
-                ores = self._episode_ores.pop(i, [])
-                ore_count = len(ores)
+                blocks = self._episode_blocks.pop(i, [])
+                block_count = len(blocks)
+                ore_count = sum(
+                    1 for b in blocks if b in _ORE_INDEX
+                )
 
                 fuel = info.get("fuel", 0)
                 step_count = info.get("step", 1)
@@ -126,6 +130,9 @@ class MetricsCallback(BaseCallback):
 
                 self.logger.record(
                     "mining/ores_per_episode", ore_count,
+                )
+                self.logger.record(
+                    "mining/blocks_per_episode", block_count,
                 )
                 self.logger.record(
                     "mining/fuel_remaining", fuel,
