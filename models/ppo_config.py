@@ -7,13 +7,26 @@ the project's hyperparameters.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from prospect_rl.config import Config
 from prospect_rl.env.mining_env import MinecraftMiningEnv
 from prospect_rl.models.policy_network import MiningFeatureExtractor
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+
+def linear_schedule(
+    initial_value: float,
+) -> Callable[[float], float]:
+    """Linear decay from *initial_value* to 0 over training.
+
+    SB3 calls the returned function with ``progress_remaining``
+    which goes from 1.0 (start) to 0.0 (end).
+    """
+    def func(progress_remaining: float) -> float:
+        return initial_value * progress_remaining
+    return func
 
 
 def make_training_env(
@@ -87,7 +100,7 @@ def create_ppo_model(
     kwargs: dict[str, Any] = {
         "policy": "MultiInputPolicy",
         "env": env,
-        "learning_rate": ppo.learning_rate,
+        "learning_rate": linear_schedule(ppo.learning_rate),
         "n_steps": ppo.n_steps,
         "batch_size": ppo.batch_size,
         "n_epochs": ppo.n_epochs,

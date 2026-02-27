@@ -194,6 +194,7 @@ def compute_stage1_reward_components(
     mined_ore_counts: np.ndarray,
     cumulative_waste_count: int,
     is_new_position: bool,
+    explored_count: int = 0,
     turtle_y: int = 0,
     ore_y_range: tuple[float, float] = (0.0, 39.0),
     world_height: int = 40,
@@ -268,8 +269,14 @@ def compute_stage1_reward_components(
         -cfg.y_penalty_scale * y_dist / max(world_height, 1)
     )
 
-    # Exploration bonus
-    r_clear = cfg.exploration_bonus if is_new_position else 0.0
+    # Exploration bonus (progressive: strong early, decays with count)
+    if is_new_position:
+        halflife = max(cfg.exploration_decay_halflife, 1)
+        r_clear = cfg.exploration_bonus / (
+            1.0 + explored_count / halflife
+        )
+    else:
+        r_clear = 0.0
 
     # Approach shaping bonus: reward for moving closer to nearest
     # visible target ore in the observation window.

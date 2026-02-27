@@ -1,6 +1,6 @@
 """Action masking for valid turtle actions.
 
-Returns a boolean mask indicating which of the 9 discrete actions are
+Returns a boolean mask indicating which of the 8 discrete actions are
 currently legal given the turtle state and surrounding world blocks.
 """
 
@@ -29,18 +29,18 @@ def get_action_mask(
     world: object,
     world_size: tuple[int, int, int],
 ) -> np.ndarray:
-    """Return a bool array of shape ``(9,)`` where True means the action is valid."""
-    mask = np.ones(9, dtype=bool)
+    """Return a bool array of shape ``(NUM_ACTIONS,)`` where True means the action is valid."""
+    from prospect_rl.config import NUM_ACTIONS
+    mask = np.ones(NUM_ACTIONS, dtype=bool)
     pos = turtle.position
     facing_vec = FACING_VECTORS[turtle.facing]
 
     up = np.array([0, 1, 0], dtype=np.int32)
     down = np.array([0, -1, 0], dtype=np.int32)
 
-    # --- Movement actions (0-3) ---
+    # --- Movement actions ---
     move_offsets = {
         Action.FORWARD: facing_vec,
-        Action.BACK: -facing_vec,
         Action.UP: up,
         Action.DOWN: down,
     }
@@ -60,11 +60,11 @@ def get_action_mask(
             # Solid block — must dig first
             mask[action] = False
 
-    # --- Turns (4-5) are always valid ---
+    # --- Turns are always valid ---
     # mask[Action.TURN_LEFT] = True  (already True)
     # mask[Action.TURN_RIGHT] = True
 
-    # --- Dig actions (6-8) ---
+    # --- Dig actions ---
     dig_offsets = {
         Action.DIG: facing_vec,
         Action.DIG_UP: up,

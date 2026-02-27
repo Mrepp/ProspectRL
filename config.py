@@ -97,14 +97,13 @@ NUM_BIOME_TYPES: int = len(BiomeType)
 
 class Action(IntEnum):
     FORWARD = 0
-    BACK = 1
-    UP = 2
-    DOWN = 3
-    TURN_LEFT = 4
-    TURN_RIGHT = 5
-    DIG = 6
-    DIG_UP = 7
-    DIG_DOWN = 8
+    UP = 1
+    DOWN = 2
+    TURN_LEFT = 3
+    TURN_RIGHT = 4
+    DIG = 5
+    DIG_UP = 6
+    DIG_DOWN = 7
 
 
 NUM_ACTIONS: int = len(Action)
@@ -112,7 +111,6 @@ NUM_ACTIONS: int = len(Action)
 # Fuel cost per action (0 = free)
 ACTION_FUEL_COST: dict[int, int] = {
     Action.FORWARD: 1,
-    Action.BACK: 1,
     Action.UP: 1,
     Action.DOWN: 1,
     Action.TURN_LEFT: 0,
@@ -421,6 +419,9 @@ class RewardConfig:
     fuel_critical_penalty: float = -1.0   # max penalty per step at fuel=0
     time_penalty: float = -0.005       # per step, encourages efficiency
 
+    # Spin penalty — discourages redundant turning (e.g. 3x right instead of 1x left)
+    spin_penalty: float = -0.1         # applied when 3+ consecutive same-direction turns
+
 
 @dataclass
 class Stage1RewardConfig:
@@ -445,6 +446,8 @@ class Stage1RewardConfig:
     # Exploration bonus per new cell visited (small — shouldn't compete
     # with ore targeting)
     exploration_bonus: float = 0.002
+    # Half-life for progressive decay: bonus halves after this many new cells
+    exploration_decay_halflife: int = 50
 
     # Non-target ore penalty multiplier (wrong ores = confused targeting)
     non_target_ore_multiplier: float = 3.0
@@ -455,7 +458,13 @@ class Stage1RewardConfig:
 
     # Approach bonus: reward for moving closer to nearest visible
     # target ore in the observation window (Change 3)
-    approach_bonus_scale: float = 0.1
+    approach_bonus_scale: float = 0.2
+
+    # Spin penalty — discourages redundant turning (e.g. 3x right instead of 1x left)
+    spin_penalty: float = -0.1
+
+    # No-op penalty — applied when a movement action fails
+    noop_penalty: float = -0.05
 
     # Per-ore reward multipliers (inverse-abundance scaling).
     # Equalizes effective reward-per-effort across ore types.
@@ -622,11 +631,11 @@ class PPOConfig:
     learning_rate: float = 3e-4
     n_steps: int = 1024
     batch_size: int = 512
-    n_epochs: int = 3
+    n_epochs: int = 5
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.15
-    ent_coef: float = 0.02
+    ent_coef: float = 0.2
     vf_coef: float = 0.75
     max_grad_norm: float = 0.5
     normalize_advantage: bool = True

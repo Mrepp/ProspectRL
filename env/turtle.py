@@ -73,17 +73,6 @@ class Turtle:
         self.position = target
         return True
 
-    def move_back(self, world: object) -> bool:
-        """Move one block opposite to the facing direction."""
-        if not self._consume_fuel(Action.BACK):
-            return False
-        target = self.position - FACING_VECTORS[self.facing]
-        if not self._can_move_to(target, world):
-            self.fuel += ACTION_FUEL_COST[Action.BACK]
-            return False
-        self.position = target
-        return True
-
     def move_up(self, world: object) -> bool:
         """Move one block up (+y)."""
         if not self._consume_fuel(Action.UP):

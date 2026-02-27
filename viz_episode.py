@@ -6,15 +6,26 @@ controls.
 
 Usage::
 
+    # Default: download latest checkpoint from project Drive
+    python -m prospect_rl.viz_episode
+
+    # Custom Drive folder link
+    python -m prospect_rl.viz_episode --drive "https://drive.google.com/drive/folders/..."
+
+    # Local checkpoint directory (reads latest.json)
+    python -m prospect_rl.viz_episode -d checkpoints/stage1 --stage 0
+
+    # Explicit model path
     python -m prospect_rl.viz_episode --model checkpoints/final/model.zip --stage 0
-    python -m prospect_rl.viz_episode --model model.zip --stage 1 --preference diamond
-    python -m prospect_rl.viz_episode --model model.zip --stage 0 --no-autoplay --speed 100
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pyvista as pv
@@ -28,6 +39,12 @@ from prospect_rl.config import (
 from prospect_rl.env.turtle import FACING_VECTORS
 
 from viz_world import BLOCK_COLORS, BLOCK_NAMES, ORE_ORDER
+
+# Default Google Drive checkpoint folder (shared link).
+DRIVE_CHECKPOINT_URL = (
+    "https://drive.google.com/drive/folders/"
+    "1Cl14a51SMKYTr2tfm-jTnsy5ne1CHZRh"
+)
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -78,7 +95,6 @@ _ORE_NAME_TO_IDX: dict[str, int] = {
 # Action name lookup
 _ACTION_NAMES: dict[int, str] = {
     Action.FORWARD: "Forward",
-    Action.BACK: "Back",
     Action.UP: "Up",
     Action.DOWN: "Down",
     Action.TURN_LEFT: "Turn Left",
@@ -723,10 +739,147 @@ class EpisodeVisualizer:
 # ---------------------------------------------------------------------------
 
 
+def _download_from_drive(url: str) -> str:
+    """Download a checkpoint folder from Google Drive.
+
+    Uses ``gdown`` to pull the shared folder into a local cache
+    directory.  Files that already exist are skipped (``resume=True``).
+
+    Returns the path to the local directory containing the downloaded
+    checkpoint files.
+    """
+    try:
+        import gdown
+    except ImportError:
+        raise ImportError(
+            "gdown is required for --drive. "
+            "Install it with: pip install gdown"
+        ) from None
+
+    cache_dir = Path(tempfile.gettempdir()) / "prospect_rl_drive"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Downloading checkpoint from Drive...")
+    paths = gdown.download_folder(
+        url=url,
+        output=str(cache_dir),
+        quiet=False,
+        remaining_ok=True,
+        resume=True,
+    )
+    if not paths:
+        raise RuntimeError(
+            f"gdown returned no files for {url}. "
+            "Check that the folder is shared with "
+            "'Anyone with the link'."
+        )
+
+    # gdown creates a subfolder named after the Drive folder.
+    # Find it — it's the newest directory inside cache_dir.
+    subdirs = sorted(
+        [p for p in cache_dir.iterdir() if p.is_dir()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if subdirs:
+        return str(subdirs[0])
+    return str(cache_dir)
+
+
+def _resolve_checkpoint(
+    checkpoint_dir: str,
+    stage_index: int | None = None,
+) -> tuple[str, str | None, int | None]:
+    """Resolve model and vecnormalize paths from a checkpoint dir.
+
+    Returns ``(model_path, vecnormalize_path, detected_stage)``.
+    ``detected_stage`` is inferred from folder names like ``stage1``
+    when *stage_index* is ``None``.
+
+    Supports:
+      - Directory with ``latest.json``
+      - Step directory containing ``model.zip`` directly
+      - Parent directory with stage subdirs (e.g. ``stage1/``)
+    """
+    d = Path(checkpoint_dir)
+
+    # Direct hit — latest.json in this directory
+    manifest = d / "latest.json"
+    if manifest.exists():
+        data = json.loads(manifest.read_text())
+        model_p = Path(data["model_path"])
+        vn_p = Path(data["vecnormalize_path"]) if data.get("vecnormalize_path") else None
+
+        # Manifest may contain absolute Colab paths that don't
+        # exist locally.  Fall back to the same relative structure
+        # under the checkpoint directory.
+        if not model_p.exists():
+            model_p = d / model_p.parent.name / model_p.name
+        if vn_p and not vn_p.exists():
+            vn_p = d / vn_p.parent.name / vn_p.name
+
+        return (
+            str(model_p),
+            str(vn_p) if vn_p else None,
+            stage_index,
+        )
+
+    # Direct hit — model.zip in this directory
+    model = d / "model.zip"
+    if model.exists():
+        vn = d / "vecnormalize.pkl"
+        return (
+            str(model),
+            str(vn) if vn.exists() else None,
+            stage_index,
+        )
+
+    # Search subdirs for stage folders with latest.json.
+    # Pick the requested stage, or the highest-numbered one.
+    candidates: list[tuple[int, Path]] = []
+    for sub in sorted(d.iterdir()):
+        if not sub.is_dir():
+            continue
+        m = sub / "latest.json"
+        if not m.exists():
+            m2 = sub / "final" / "model.zip"
+            if not m2.exists():
+                continue
+        # Try to extract stage number from folder name
+        name = sub.name.lower()
+        stage_num: int | None = None
+        for i, cs in enumerate(CURRICULUM_STAGES):
+            if name == cs.name or name == f"stage{i + 1}":
+                stage_num = i
+                break
+        candidates.append((stage_num if stage_num is not None else -1, sub))
+
+    if candidates:
+        if stage_index is not None:
+            # Pick the matching stage
+            for sn, sub in candidates:
+                if sn == stage_index:
+                    return _resolve_checkpoint(
+                        str(sub), stage_index,
+                    )
+        # Default: pick highest stage number
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_stage, best_sub = candidates[0]
+        detected = best_stage if best_stage >= 0 else None
+        return _resolve_checkpoint(
+            str(best_sub), detected,
+        )
+
+    raise FileNotFoundError(
+        f"No latest.json or model.zip found in {d}"
+    )
+
+
 def main() -> None:
     n = len(CURRICULUM_STAGES)
     stage_help = [
-        f"  {i}: {s.name} ({s.world_size[0]}x{s.world_size[1]}x{s.world_size[2]})"
+        f"  {i}: {s.name} "
+        f"({s.world_size[0]}x{s.world_size[1]}x{s.world_size[2]})"
         for i, s in enumerate(CURRICULUM_STAGES)
     ]
 
@@ -736,16 +889,35 @@ def main() -> None:
         epilog="Curriculum stages:\n" + "\n".join(stage_help),
     )
     parser.add_argument(
-        "--model", type=str, required=True,
+        "--model", "-m", type=str, default=None,
         help="Path to model.zip (MaskablePPO)",
+    )
+    parser.add_argument(
+        "--checkpoint-dir", "-d", type=str, default=None,
+        help=(
+            "Checkpoint directory (reads latest.json "
+            "or model.zip inside)"
+        ),
+    )
+    parser.add_argument(
+        "--drive", type=str, default=None, nargs="?",
+        const=DRIVE_CHECKPOINT_URL,
+        help=(
+            "Google Drive shareable folder URL. "
+            "If used without a URL, defaults to the "
+            "project checkpoint folder."
+        ),
     )
     parser.add_argument(
         "--vecnormalize", type=str, default=None,
         help="Path to vecnormalize.pkl (optional)",
     )
     parser.add_argument(
-        "--stage", type=int, default=0, choices=range(n),
-        help=f"Curriculum stage 0-{n-1} (default: 0)",
+        "--stage", type=int, default=None, choices=range(n),
+        help=(
+            f"Curriculum stage 0-{n-1}. "
+            "Auto-detected from checkpoint folder when omitted."
+        ),
     )
     parser.add_argument(
         "--seed", type=int, default=42,
@@ -753,7 +925,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--preference", type=str, default=None,
-        help="Ore name (e.g. 'diamond') or comma-separated weights",
+        help=(
+            "Ore name (e.g. 'diamond') or "
+            "comma-separated weights"
+        ),
     )
     parser.add_argument(
         "--speed", type=int, default=200,
@@ -770,6 +945,52 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Resolve model source. Default to Drive when nothing given.
+    sources = [args.drive, args.checkpoint_dir, args.model]
+    n_sources = sum(s is not None for s in sources)
+    if n_sources > 1:
+        parser.error(
+            "Provide at most one of "
+            "--drive, --checkpoint-dir, or --model"
+        )
+    if n_sources == 0:
+        # No source specified — default to Drive
+        args.drive = DRIVE_CHECKPOINT_URL
+
+    model_path = args.model
+    vn_path = args.vecnormalize
+    stage_index = args.stage
+
+    if args.drive:
+        local_dir = _download_from_drive(args.drive)
+        model_path, resolved_vn, detected_stage = (
+            _resolve_checkpoint(local_dir, stage_index)
+        )
+        if vn_path is None:
+            vn_path = resolved_vn
+        if stage_index is None and detected_stage is not None:
+            stage_index = detected_stage
+    elif args.checkpoint_dir:
+        model_path, resolved_vn, detected_stage = (
+            _resolve_checkpoint(
+                args.checkpoint_dir, stage_index,
+            )
+        )
+        if vn_path is None:
+            vn_path = resolved_vn
+        if stage_index is None and detected_stage is not None:
+            stage_index = detected_stage
+    else:
+        # --model: auto-detect vecnormalize next to model
+        if vn_path is None:
+            sibling = Path(args.model).parent / "vecnormalize.pkl"
+            if sibling.exists():
+                vn_path = str(sibling)
+
+    if stage_index is None:
+        stage_index = 0
+        print("No stage detected, defaulting to stage 0")
+
     # Parse preference
     pref = None
     if args.preference:
@@ -777,20 +998,26 @@ def main() -> None:
         ore_names = list(_ORE_NAME_TO_IDX.keys())
         pref_desc = ", ".join(
             f"{ore_names[i]}={pref[i]:.2f}"
-            for i in range(len(pref)) if pref[i] > 0.01
+            for i in range(len(pref))
+            if pref[i] > 0.01
         )
         print(f"Preference override: {pref_desc}")
 
     # Record episode
-    print(f"Loading model from {args.model}...")
-    print(f"Running episode (stage={args.stage}, seed={args.seed})...")
+    print(f"Loading model from {model_path}...")
+    if vn_path:
+        print(f"Using vecnormalize from {vn_path}")
+    print(
+        f"Running episode "
+        f"(stage={stage_index}, seed={args.seed})..."
+    )
 
     trajectory = record_episode(
-        model_path=args.model,
-        stage_index=args.stage,
+        model_path=model_path,
+        stage_index=stage_index,
         seed=args.seed,
         preference=pref,
-        vecnormalize_path=args.vecnormalize,
+        vecnormalize_path=vn_path,
     )
 
     print(f"Episode complete: {len(trajectory.steps)} steps, "

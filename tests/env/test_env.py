@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 from gymnasium.utils.env_checker import check_env
 from prospect_rl.config import (
+    NUM_ACTIONS,
     NUM_ORE_TYPES,
     NUM_VOXEL_CHANNELS,
     OBS_WINDOW_X,
@@ -83,7 +84,7 @@ class TestActionMasking:
         env = MinecraftMiningEnv(curriculum_stage=0)
         env.reset(seed=42)
         mask = env.action_masks()
-        assert mask.shape == (9,)
+        assert mask.shape == (NUM_ACTIONS,)
         assert mask.dtype == bool
 
     def test_turns_always_valid(self) -> None:
@@ -97,8 +98,8 @@ class TestActionMasking:
         """Even if we take a masked action, env shouldn't crash."""
         env = MinecraftMiningEnv(curriculum_stage=0)
         env.reset(seed=42)
-        # Take all 9 actions — env should handle gracefully
-        for action in range(9):
+        # Take all actions — env should handle gracefully
+        for action in range(NUM_ACTIONS):
             env.step(action)
 
 
@@ -266,11 +267,16 @@ class TestReset:
         np.testing.assert_array_equal(obs1["scalars"], obs2["scalars"])
 
     def test_different_seeds_different_obs(self) -> None:
-        env = MinecraftMiningEnv(curriculum_stage=0)
-        obs1, _ = env.reset(seed=1)
-        obs2, _ = env.reset(seed=9999)
-        # Preferences should likely differ
-        assert not np.array_equal(obs1["pref"], obs2["pref"])
+        env1 = MinecraftMiningEnv(curriculum_stage=0, seed=1)
+        env2 = MinecraftMiningEnv(curriculum_stage=0, seed=9999)
+        # Collect preferences over several resets; sequences should differ
+        prefs1 = [env1.reset()[0]["pref"].copy() for _ in range(8)]
+        prefs2 = [env2.reset()[0]["pref"].copy() for _ in range(8)]
+        any_differ = any(
+            not np.array_equal(p1, p2)
+            for p1, p2 in zip(prefs1, prefs2)
+        )
+        assert any_differ
 
 
 # ---------------------------------------------------------------------------

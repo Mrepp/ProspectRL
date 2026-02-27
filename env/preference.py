@@ -23,6 +23,14 @@ class PreferenceManager:
     ) -> None:
         self.rng = np.random.default_rng(seed)
         self.num_ores = num_ores
+        self._stratified_queue: list[int] = []
+
+    def _next_stratified_index(self) -> int:
+        """Return next ore index from a shuffled round-robin queue."""
+        if not self._stratified_queue:
+            self._stratified_queue = list(range(self.num_ores))
+            self.rng.shuffle(self._stratified_queue)
+        return self._stratified_queue.pop()
 
     def sample(self, mode: str = "one_hot") -> np.ndarray:
         """Sample a preference vector of shape ``(num_ores,)`` summing to 1.0.
@@ -36,7 +44,7 @@ class PreferenceManager:
         """
         if mode == "one_hot":
             w = np.zeros(self.num_ores, dtype=np.float32)
-            w[self.rng.integers(self.num_ores)] = 1.0
+            w[self._next_stratified_index()] = 1.0
             return w
 
         if mode == "two_mix":

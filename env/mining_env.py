@@ -3,7 +3,7 @@
 Features:
 - Dict observation space: ``voxels`` (3D one-hot tensor), ``scalars``
   (global features), and ``pref`` (ore preference)
-- Discrete(9) action space with action masking for MaskablePPO
+- Discrete(8) action space with action masking for MaskablePPO
 - Sliding 3D observation window (fixed size, independent of world size)
 - Stub world for development without Phase 1 world simulation
 """
@@ -24,6 +24,7 @@ from prospect_rl.config import (
     CH_TARGET,
     CURRICULUM_STAGES,
     MAX_WORLD_HEIGHT,
+    NUM_ACTIONS,
     NUM_ORE_TYPES,
     NUM_VOXEL_CHANNELS,
     OBS_WINDOW_RADIUS_XZ,
@@ -38,6 +39,8 @@ from prospect_rl.config import (
     SOLID_BLOCKS,
     Action,
     BlockType,
+    RewardConfig,
+    Stage1RewardConfig,
     get_ore_y_ranges,
 )
 from prospect_rl.env.action_masking import get_action_mask
@@ -231,7 +234,7 @@ class MinecraftMiningEnv(gym.Env):
                 dtype=np.float32,
             ),
         })
-        self.action_space = spaces.Discrete(9)
+        self.action_space = spaces.Discrete(NUM_ACTIONS)
 
         # Will be initialised in reset()
         self._world: _StubWorld | None = None
@@ -256,6 +259,10 @@ class MinecraftMiningEnv(gym.Env):
         self._total_target_ores_in_world: int = 0
         self._ore_y_range: tuple[float, float] = (0.0, 39.0)
         self._prev_nearest_target_dist: float = float("inf")
+
+        # Spin detection state
+        self._consecutive_turn_count: int = 0
+        self._last_turn_direction: int | None = None
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -344,6 +351,10 @@ class MinecraftMiningEnv(gym.Env):
         self._prev_adjacent_weight = 0.0
         self._consecutive_skip_count = 0
 
+        # Spin detection reset
+        self._consecutive_turn_count = 0
+        self._last_turn_direction = None
+
         # Stage 1: count target ores, reset waste, compute Y-range
         if self._is_stage1:
             self._total_target_ores_in_world = (
@@ -375,14 +386,13 @@ class MinecraftMiningEnv(gym.Env):
             )
 
         # Execute action
+        move_succeeded = True
         if action == Action.FORWARD:
-            self._turtle.move_forward(self._world)
-        elif action == Action.BACK:
-            self._turtle.move_back(self._world)
+            move_succeeded = self._turtle.move_forward(self._world)
         elif action == Action.UP:
-            self._turtle.move_up(self._world)
+            move_succeeded = self._turtle.move_up(self._world)
         elif action == Action.DOWN:
-            self._turtle.move_down(self._world)
+            move_succeeded = self._turtle.move_down(self._world)
         elif action == Action.TURN_LEFT:
             self._turtle.turn_left()
         elif action == Action.TURN_RIGHT:
@@ -396,6 +406,17 @@ class MinecraftMiningEnv(gym.Env):
         elif action == Action.DIG_DOWN:
             block_mined = self._get_dig_block(action)
             self._turtle.dig_down(self._world)
+
+        # Track consecutive same-direction turns for spin penalty
+        if action in (Action.TURN_LEFT, Action.TURN_RIGHT):
+            if action == self._last_turn_direction:
+                self._consecutive_turn_count += 1
+            else:
+                self._consecutive_turn_count = 1
+                self._last_turn_direction = action
+        else:
+            self._consecutive_turn_count = 0
+            self._last_turn_direction = None
 
         # Adjacent weight AFTER action (stages 2-5 only)
         if not self._is_stage1:
@@ -434,6 +455,7 @@ class MinecraftMiningEnv(gym.Env):
                     self._cumulative_waste_count
                 ),
                 is_new_position=is_new_position,
+                explored_count=len(self._explored),
                 turtle_y=int(self._turtle.position[1]),
                 ore_y_range=self._ore_y_range,
                 world_height=self._stage_cfg.world_size[1],
@@ -443,6 +465,20 @@ class MinecraftMiningEnv(gym.Env):
                 curr_nearest_target_dist=curr_dist,
             )
             self._prev_nearest_target_dist = curr_dist
+
+            # Spin penalty: penalise 3+ consecutive same-direction turns
+            s1_cfg = Stage1RewardConfig()
+            if self._consecutive_turn_count >= 3:
+                r_ops += s1_cfg.spin_penalty
+
+            # No-op penalty: movement action that failed
+            if (
+                action in (
+                    Action.FORWARD, Action.UP, Action.DOWN,
+                )
+                and not move_succeeded
+            ):
+                r_ops += s1_cfg.noop_penalty
 
             # Terminal completion bonus
             terminal_bonus = 0.0
@@ -482,6 +518,11 @@ class MinecraftMiningEnv(gym.Env):
                 ),
             )
             terminal_bonus = 0.0
+
+            # Spin penalty: penalise 3+ consecutive same-direction turns
+            if self._consecutive_turn_count >= 3:
+                spin_cfg = RewardConfig()
+                r_ops += spin_cfg.spin_penalty
 
             reward = PreferenceManager.scalarize(
                 r_harvest, r_adjacent, r_clear, r_ops,

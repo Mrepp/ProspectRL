@@ -234,14 +234,12 @@ def _build_action_mask(req: ActRequest) -> np.ndarray:
     # Movement fuel check
     if req.fuel < 1:
         mask[Action.FORWARD] = False
-        mask[Action.BACK] = False
         mask[Action.UP] = False
         mask[Action.DOWN] = False
 
     # Movement collision checks
     move_offsets = {
         Action.FORWARD: (int(fv[0]), int(fv[1]), int(fv[2])),
-        Action.BACK: (-int(fv[0]), -int(fv[1]), -int(fv[2])),
         Action.UP: (0, 1, 0),
         Action.DOWN: (0, -1, 0),
     }
