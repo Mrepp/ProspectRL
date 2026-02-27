@@ -432,25 +432,43 @@ class Stage1RewardConfig:
     """
 
     # Per-target-ore immediate reward
-    per_ore_reward: float = 1.0
+    per_ore_reward: float = 3.0
 
     # Terminal completion bonus
-    completion_scale: float = 20.0
+    completion_scale: float = 10.0
 
-    # Waste penalty (soft — de-emphasized for Stage 1)
-    waste_beta: float = 0.02
-    waste_ramp: int = 100
-    waste_alpha: float = 2.0
+    # Waste penalty (ramps fast to discourage indiscriminate mining)
+    waste_beta: float = 0.15
+    waste_ramp: int = 50
+    waste_alpha: float = 1.5
 
-    # Exploration bonus per new cell visited
-    exploration_bonus: float = 0.01
+    # Exploration bonus per new cell visited (small — shouldn't compete
+    # with ore targeting)
+    exploration_bonus: float = 0.002
 
-    # Non-target ore penalty multiplier
-    non_target_ore_multiplier: float = 1.5
+    # Non-target ore penalty multiplier (wrong ores = confused targeting)
+    non_target_ore_multiplier: float = 3.0
 
     # Y-distance penalty: per-step cost when outside target
     # ore's Y range. Scales linearly with distance from range.
-    y_penalty_scale: float = 0.03
+    y_penalty_scale: float = 0.3
+
+    # Approach bonus: reward for moving closer to nearest visible
+    # target ore in the observation window (Change 3)
+    approach_bonus_scale: float = 0.1
+
+    # Per-ore reward multipliers (inverse-abundance scaling).
+    # Equalizes effective reward-per-effort across ore types.
+    ore_reward_multipliers: list[float] = field(default_factory=lambda: [
+        0.5,   # coal (very common)
+        0.7,   # iron (common)
+        1.2,   # gold (moderate)
+        2.0,   # diamond (rare)
+        1.0,   # redstone (moderate)
+        2.5,   # emerald (very rare)
+        1.0,   # lapis (moderate)
+        0.7,   # copper (common)
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +497,7 @@ OBS_WINDOW_Y_BELOW: int = 23  # blocks below turtle in window
 
 # Channel groups for voxel encoding
 NUM_ORE_CHANNELS: int = NUM_ORE_TYPES  # 8
-NUM_VOXEL_CHANNELS: int = NUM_ORE_TYPES + 4 + 1  # ores + solid/soft/air/bedrock + explored = 13
+NUM_VOXEL_CHANNELS: int = NUM_ORE_TYPES + 4 + 1 + 1  # ores + solid/soft/air/bedrock + explored + target = 14
 
 # Block-to-channel mapping (grouped by dynamics)
 SOLID_BLOCKS: frozenset[int] = frozenset({
@@ -498,6 +516,7 @@ CH_SOFT: int = NUM_ORE_TYPES + 1    # 9
 CH_AIR: int = NUM_ORE_TYPES + 2     # 10
 CH_BEDROCK: int = NUM_ORE_TYPES + 3  # 11
 CH_EXPLORED: int = NUM_ORE_TYPES + 4  # 12
+CH_TARGET: int = NUM_ORE_TYPES + 5   # 13
 
 # Scalar observation: pos(3) + facing(4) + fuel(1) + inv(8) + world_h(1)
 SCALAR_OBS_DIM: int = 3 + 4 + 1 + NUM_ORE_TYPES + 1  # 17
@@ -600,14 +619,14 @@ CURRICULUM_STAGES: list[CurriculumStage] = [
 @dataclass
 class PPOConfig:
     """PPO training hyperparameters."""
-    learning_rate: float = 1e-4
-    n_steps: int = 2048
-    batch_size: int = 256
-    n_epochs: int = 4
+    learning_rate: float = 3e-4
+    n_steps: int = 1024
+    batch_size: int = 512
+    n_epochs: int = 3
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    clip_range: float = 0.2
-    ent_coef: float = 0.01
+    clip_range: float = 0.15
+    ent_coef: float = 0.02
     vf_coef: float = 0.75
     max_grad_norm: float = 0.5
     normalize_advantage: bool = True

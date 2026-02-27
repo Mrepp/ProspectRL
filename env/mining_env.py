@@ -21,6 +21,7 @@ from prospect_rl.config import (
     CH_EXPLORED,
     CH_SOFT,
     CH_SOLID,
+    CH_TARGET,
     CURRICULUM_STAGES,
     MAX_WORLD_HEIGHT,
     NUM_ORE_TYPES,
@@ -254,6 +255,7 @@ class MinecraftMiningEnv(gym.Env):
         self._cumulative_waste_count: int = 0
         self._total_target_ores_in_world: int = 0
         self._ore_y_range: tuple[float, float] = (0.0, 39.0)
+        self._prev_nearest_target_dist: float = float("inf")
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -349,6 +351,7 @@ class MinecraftMiningEnv(gym.Env):
             )
             self._cumulative_waste_count = 0
             self._ore_y_range = self._compute_ore_y_range()
+            self._prev_nearest_target_dist = float("inf")
 
         obs = self._build_obs()
         info = self._build_info()
@@ -419,6 +422,7 @@ class MinecraftMiningEnv(gym.Env):
 
         # Compute reward components (stage-aware)
         if self._is_stage1:
+            curr_dist = self._nearest_target_ore_dist()
             (
                 r_harvest, r_adjacent, r_clear, r_ops,
                 self._cumulative_waste_count,
@@ -433,7 +437,12 @@ class MinecraftMiningEnv(gym.Env):
                 turtle_y=int(self._turtle.position[1]),
                 ore_y_range=self._ore_y_range,
                 world_height=self._stage_cfg.world_size[1],
+                prev_nearest_target_dist=(
+                    self._prev_nearest_target_dist
+                ),
+                curr_nearest_target_dist=curr_dist,
             )
+            self._prev_nearest_target_dist = curr_dist
 
             # Terminal completion bonus
             terminal_bonus = 0.0
@@ -579,6 +588,44 @@ class MinecraftMiningEnv(gym.Env):
         if not target_ids:
             return 0
         return self._world.count_blocks(target_ids)
+
+    def _nearest_target_ore_dist(self) -> float:
+        """Manhattan distance to nearest target ore in the obs window.
+
+        Scans the raw world data within the sliding window for blocks
+        matching the current preference.  Returns ``float('inf')`` if
+        no target ore is visible.
+        """
+        assert self._turtle is not None and self._world is not None
+        assert self._preference is not None
+
+        raw = self._world.get_sliding_window(
+            self._turtle.position,
+            radius_xz=OBS_WINDOW_RADIUS_XZ,
+            y_above=OBS_WINDOW_Y_ABOVE,
+            y_below=OBS_WINDOW_Y_BELOW,
+        )
+
+        # Build boolean mask of target ore positions in raw (X, Y, Z)
+        target_mask = np.zeros(raw.shape, dtype=bool)
+        for i, ore_bt in enumerate(ORE_TYPES):
+            if self._preference[i] > 0:
+                target_mask |= raw == int(ore_bt)
+
+        if not np.any(target_mask):
+            return float("inf")
+
+        # Agent is at center of window:
+        #   X = OBS_WINDOW_RADIUS_XZ
+        #   Y = OBS_WINDOW_Y_BELOW  (raw is X, Y, Z)
+        #   Z = OBS_WINDOW_RADIUS_XZ
+        center = np.array(
+            [OBS_WINDOW_RADIUS_XZ, OBS_WINDOW_Y_BELOW,
+             OBS_WINDOW_RADIUS_XZ],
+        )
+        coords = np.argwhere(target_mask)  # (N, 3)
+        dists = np.abs(coords - center).sum(axis=1)
+        return float(dists.min())
 
     def _compute_adjacent_desired_weight(self) -> float:
         """Sum preference weights of desired ores adjacent to the turtle.
@@ -726,6 +773,19 @@ class MinecraftMiningEnv(gym.Env):
 
         # Explored mask channel
         tensor[CH_EXPLORED] = self._build_explored_mask()
+
+        # Target ore highlight: fuse per-ore channels weighted by
+        # preference so the CNN can detect target ores spatially
+        # without needing to learn the pref-to-channel mapping.
+        target_mask = np.zeros_like(tensor[0])
+        for i in range(NUM_ORE_TYPES):
+            if self._preference[i] > 0:
+                np.maximum(
+                    target_mask,
+                    self._preference[i] * tensor[i],
+                    out=target_mask,
+                )
+        tensor[CH_TARGET] = target_mask
 
         return tensor
 

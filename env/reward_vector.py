@@ -197,6 +197,8 @@ def compute_stage1_reward_components(
     turtle_y: int = 0,
     ore_y_range: tuple[float, float] = (0.0, 39.0),
     world_height: int = 40,
+    prev_nearest_target_dist: float = float("inf"),
+    curr_nearest_target_dist: float = float("inf"),
     stage1_config: Stage1RewardConfig | None = None,
 ) -> tuple[float, float, float, float, int]:
     """Compute Stage 1 reward components.
@@ -212,7 +214,7 @@ def compute_stage1_reward_components(
     r_adjacent:
         Y-distance penalty (negative when outside ore range).
     r_clear:
-        Exploration bonus (positive for new cells).
+        Exploration bonus + approach shaping bonus.
     r_ops:
         Waste penalty (negative for non-target digs).
     new_waste_count:
@@ -229,9 +231,13 @@ def compute_stage1_reward_components(
             idx = _ORE_INDEX[block_mined]
             mined_ore_counts[idx] += 1
             if preference[idx] > 0:
-                # Target ore: immediate positive reward
-                r_harvest = cfg.per_ore_reward * float(
-                    preference[idx],
+                # Target ore: immediate positive reward, scaled
+                # by ore-specific difficulty multiplier
+                ore_mult = cfg.ore_reward_multipliers[idx]
+                r_harvest = (
+                    cfg.per_ore_reward
+                    * float(preference[idx])
+                    * ore_mult
                 )
             else:
                 # Non-target ore: waste with multiplier
@@ -264,6 +270,17 @@ def compute_stage1_reward_components(
 
     # Exploration bonus
     r_clear = cfg.exploration_bonus if is_new_position else 0.0
+
+    # Approach shaping bonus: reward for moving closer to nearest
+    # visible target ore in the observation window.
+    if (
+        prev_nearest_target_dist < float("inf")
+        or curr_nearest_target_dist < float("inf")
+    ):
+        # Only apply when at least one measurement is finite
+        p = min(prev_nearest_target_dist, 50.0)
+        c = min(curr_nearest_target_dist, 50.0)
+        r_clear += cfg.approach_bonus_scale * (p - c)
 
     return r_harvest, r_adjacent, r_clear, r_ops, new_waste_count
 

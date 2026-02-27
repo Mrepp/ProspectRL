@@ -832,7 +832,9 @@ class TestStage1Reward:
             is_new_position=False,
         )
         assert r_h == pytest.approx(
-            _S1_CFG.per_ore_reward * 1.0,
+            _S1_CFG.per_ore_reward
+            * 1.0
+            * _S1_CFG.ore_reward_multipliers[3],
         )
 
     def test_no_harvest_for_non_target_ore(self) -> None:
