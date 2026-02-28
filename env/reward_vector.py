@@ -200,6 +200,7 @@ def compute_stage1_reward_components(
     world_height: int = 40,
     prev_nearest_target_dist: float = float("inf"),
     curr_nearest_target_dist: float = float("inf"),
+    total_target_ores_in_world: int = 100,
     stage1_config: Stage1RewardConfig | None = None,
 ) -> tuple[float, float, float, float, int]:
     """Compute Stage 1 reward components.
@@ -233,12 +234,19 @@ def compute_stage1_reward_components(
             mined_ore_counts[idx] += 1
             if preference[idx] > 0:
                 # Target ore: immediate positive reward, scaled
-                # by ore-specific difficulty multiplier
-                ore_mult = cfg.ore_reward_multipliers[idx]
+                # dynamically by inverse world abundance
+                abundance_mult = min(
+                    cfg.harvest_count_ceil,
+                    max(
+                        cfg.harvest_count_floor,
+                        cfg.harvest_reference_count
+                        / max(total_target_ores_in_world, 1),
+                    ),
+                )
                 r_harvest = (
                     cfg.per_ore_reward
                     * float(preference[idx])
-                    * ore_mult
+                    * abundance_mult
                 )
             else:
                 # Non-target ore: waste with multiplier

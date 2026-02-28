@@ -37,12 +37,14 @@ class World:
         seed: int = 42,
         ore_density_multiplier: float = 1.0,
         caves_enabled: bool = True,
+        forced_biome: int | None = None,
         **kwargs: Any,
     ) -> None:
         self._size = size
         self._seed = seed
         self._ore_density_multiplier = ore_density_multiplier
         self._caves_enabled = caves_enabled
+        self._forced_biome = forced_biome
         self._cave_config = CaveConfig()
 
         self._blocks: np.ndarray = np.empty(0, dtype=np.int8)
@@ -194,9 +196,15 @@ class World:
         self._blocks[:, 0, :] = BlockType.BEDROCK
 
         # 3. Generate biome map
-        self._biome_map = BiomeGenerator.generate_biome_map(
-            sx, sz, self._seed,
-        )
+        if self._forced_biome is not None:
+            self._biome_map = np.full(
+                (sx, sz), np.int8(self._forced_biome),
+                dtype=np.int8,
+            )
+        else:
+            self._biome_map = BiomeGenerator.generate_biome_map(
+                sx, sz, self._seed,
+            )
 
         # 4. Place deepslate below MC y=0
         OreDistributor.place_deepslate(self._blocks, self._size)

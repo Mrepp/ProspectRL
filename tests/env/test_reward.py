@@ -831,10 +831,9 @@ class TestStage1Reward:
             cumulative_waste_count=0,
             is_new_position=False,
         )
+        # Default total_target_ores_in_world=100, reference=100 → mult=1.0
         assert r_h == pytest.approx(
-            _S1_CFG.per_ore_reward
-            * 1.0
-            * _S1_CFG.ore_reward_multipliers[3],
+            _S1_CFG.per_ore_reward * 1.0,
         )
 
     def test_no_harvest_for_non_target_ore(self) -> None:

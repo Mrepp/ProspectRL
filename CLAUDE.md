@@ -42,7 +42,10 @@ Stage 1 is the entry curriculum (dense world, infinite fuel, one-hot preference)
 
 | Component | Parameter | Default | Formula / Justification |
 |---|---|---|---|
-| **Harvest (per-ore)** | `per_ore_reward` | `5.0` | Immediate reward = `5.0 * preference[ore_idx] * ore_multiplier` when a target ore is mined. Strong signal to dominate per-step costs. |
+| **Harvest (per-ore)** | `per_ore_reward` | `5.0` | Immediate reward = `5.0 * pref[idx] * abundance_mult`. Abundance multiplier = `clamp(reference_count / target_count, 0.25, 10.0)` normalizes reward by world ore count. |
+| | `harvest_reference_count` | `100.0` | Reference ore count for dynamic scaling. Worlds with fewer target ores give higher per-ore reward. |
+| | `harvest_count_floor` | `0.25` | Minimum abundance multiplier (for very common ores). |
+| | `harvest_count_ceil` | `10.0` | Maximum abundance multiplier (for very rare ores). |
 | **Completion bonus** | `completion_scale` | `10.0` | Terminal bonus = `10.0 * (target_mined / target_in_world)`. End-of-episode incentive for maximizing target ore collection. |
 | **Waste penalty** | `waste_beta` | `0.05` | Penalty for mining non-target blocks. Ramps as `-(0.05) * (waste_count / waste_ramp)^alpha`. Kept soft — depth navigation is the priority over waste avoidance. |
 | | `waste_ramp` | `200` | Number of waste blocks over which the penalty ramps to full strength. Slow ramp lets agent build mining habit before refining. |
@@ -50,8 +53,9 @@ Stage 1 is the entry curriculum (dense world, infinite fuel, one-hot preference)
 | | `non_target_ore_multiplier` | `1.5` | Non-target *ores* count as 1.5x waste vs regular blocks (stone/dirt). |
 | **Exploration bonus** | `exploration_bonus` | `0.002` | Small per-step reward for visiting a new cell. Decays with `exploration_decay_halflife=50`. |
 | **Y-distance penalty** | `y_penalty_scale` | `1.0` | Per-step cost when outside target ore's Y-range: `-(1.0) * y_dist / world_height`. Primary depth-navigation signal. |
-| **Y-in-range bonus** | `y_in_range_bonus` | `0.01` | Per-step bonus when at the correct depth. Positive attractor that complements the Y-distance penalty. |
-| **Time penalty** | `time_penalty` | `-0.003` | Mild per-step cost. Low enough to not overwhelm depth/mining signals. |
+| **Y-in-range bonus** | `y_in_range_bonus` | `0.0` | Per-step bonus when at the correct depth (disabled by default). |
+| **Time penalty** | `time_penalty` | `-0.01` | Per-step cost to discourage idle looping. |
+| **Idle penalty** | `idle_penalty_scale` | `-0.005` | Ramps with steps since last dig: `max(-0.5, -0.005 * (steps - grace))`. Grace period = 10 steps. |
 
 ### Scalarization
 

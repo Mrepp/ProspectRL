@@ -90,6 +90,13 @@ class BiomeType(IntEnum):
 
 NUM_BIOME_TYPES: int = len(BiomeType)
 
+# Biome required for each ore type to guarantee spawning.
+# Only ores whose *every* spawn config requires a specific biome need
+# an entry here.  Absent means the ore spawns in all biomes.
+ORE_FORCED_BIOME: dict[int, int] = {
+    5: int(BiomeType.MOUNTAINS),  # Emerald only spawns in Mountains
+}
+
 
 # ---------------------------------------------------------------------------
 # Action Space
@@ -457,7 +464,11 @@ class Stage1RewardConfig:
     y_penalty_scale: float = 1.0
 
     # Y-in-range bonus: small per-step reward for being at correct depth
-    y_in_range_bonus: float = 0.01
+    y_in_range_bonus: float = 0.0
+
+    # One-time bonus when the agent first reaches the target Y-range.
+    # Compensates for navigation cost that varies by ore type.
+    y_arrival_bonus: float = 3.0
 
     # Approach bonus: reward for moving closer to nearest visible
     # target ore in the observation window (Change 3)
@@ -469,26 +480,25 @@ class Stage1RewardConfig:
     # No-op penalty — applied when a movement action fails
     noop_penalty: float = -0.05
 
-    # Per-step time penalty — mild cost to discourage idle looping
-    time_penalty: float = -0.003
+    # Per-step time penalty — cost to discourage idle looping
+    time_penalty: float = -0.01
+
+    # Idle penalty — ramps with steps since last successful dig
+    idle_penalty_scale: float = -0.005
+    idle_penalty_grace: int = 10
 
     # Loiter penalty — penalises staying in a small area
-    loiter_window: int = 20
-    loiter_penalty: float = -0.15
-    loiter_unique_threshold: int = 5
+    loiter_window: int = 12
+    loiter_penalty: float = -0.2
+    loiter_unique_threshold: int = 8
 
-    # Per-ore reward multipliers (inverse-abundance scaling).
-    # Equalizes effective reward-per-effort across ore types.
-    ore_reward_multipliers: list[float] = field(default_factory=lambda: [
-        0.5,   # coal (very common)
-        0.7,   # iron (common)
-        1.2,   # gold (moderate)
-        2.0,   # diamond (rare)
-        1.0,   # redstone (moderate)
-        2.5,   # emerald (very rare)
-        1.0,   # lapis (moderate)
-        0.7,   # copper (common)
-    ])
+    # Dynamic per-ore reward scaling: normalise by world target count
+    # so the total available harvest reward is ~constant regardless of
+    # ore abundance.  effective_reward = per_ore_reward * (reference / count).
+    # Clamped to [harvest_count_floor, harvest_count_ceil] to avoid extremes.
+    harvest_reference_count: float = 100.0
+    harvest_count_floor: float = 0.25   # minimum multiplier
+    harvest_count_ceil: float = 10.0    # maximum multiplier
 
 
 # ---------------------------------------------------------------------------
@@ -646,7 +656,7 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.15
-    ent_coef: float = 0.05
+    ent_coef: float = 0.15
     vf_coef: float = 0.75
     max_grad_norm: float = 0.5
     normalize_advantage: bool = True
@@ -661,7 +671,7 @@ class PPOConfig:
 @dataclass
 class TrainingConfig:
     """Training runtime settings."""
-    n_envs: int = 4
+    n_envs: int = 16
     total_timesteps: int = 1_000_000
     checkpoint_freq: int = 25_000        # save every N steps
     eval_freq: int = 10_000              # evaluate every N steps

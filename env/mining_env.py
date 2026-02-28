@@ -184,6 +184,8 @@ class MinecraftMiningEnv(gym.Env):
         preference_mode: str | None = None,
         world_class: type | None = None,
         seed: int | None = None,
+        fixed_ore_index: int | None = None,
+        forced_biome: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -201,6 +203,10 @@ class MinecraftMiningEnv(gym.Env):
             self._world_class = _RealWorld
         else:
             self._world_class = _StubWorld
+
+        # Per-env ore assignment and biome forcing
+        self._fixed_ore_index: int | None = fixed_ore_index
+        self._forced_biome: int | None = forced_biome
 
         # RNG
         self._seed = seed
@@ -270,6 +276,12 @@ class MinecraftMiningEnv(gym.Env):
             maxlen=Stage1RewardConfig().loiter_window,
         )
 
+        # Y-arrival bonus state
+        self._reached_target_depth: bool = False
+
+        # Idle (non-dig) penalty state
+        self._steps_since_last_dig: int = 0
+
     # ------------------------------------------------------------------
     # Gymnasium API
     # ------------------------------------------------------------------
@@ -305,6 +317,7 @@ class MinecraftMiningEnv(gym.Env):
                     self._stage_cfg.ore_density_multiplier
                 ),
                 caves_enabled=self._stage_cfg.caves_enabled,
+                forced_biome=self._forced_biome,
             )
 
         # Place turtle at centre of the world (y above bedrock)
@@ -326,15 +339,18 @@ class MinecraftMiningEnv(gym.Env):
         )
 
         # Sample preference for this episode
-        self._preference = self._pref_mgr.sample(
-            mode=self._preference_mode,
-        )
-
-        # Stage 1: resample if target ore doesn't exist in this world
-        if self._is_stage1:
-            self._preference = self._ensure_achievable_preference(
-                self._preference,
+        if self._fixed_ore_index is not None:
+            pref = np.zeros(NUM_ORE_TYPES, dtype=np.float32)
+            pref[self._fixed_ore_index] = 1.0
+            self._preference = pref
+        else:
+            pref = self._pref_mgr.sample(
+                mode=self._preference_mode,
             )
+            # Stage 1: resample if target ore doesn't exist
+            if self._is_stage1:
+                pref = self._ensure_achievable_preference(pref)
+            self._preference = pref
 
         # Explored set
         self._explored = set()
@@ -363,6 +379,12 @@ class MinecraftMiningEnv(gym.Env):
 
         # Loiter detection reset
         self._recent_positions.clear()
+
+        # Idle penalty reset
+        self._steps_since_last_dig = 0
+
+        # Arrival bonus reset
+        self._reached_target_depth = False
 
         # Stage 1: count target ores, reset waste, compute Y-range
         if self._is_stage1:
@@ -475,11 +497,24 @@ class MinecraftMiningEnv(gym.Env):
                     self._prev_nearest_target_dist
                 ),
                 curr_nearest_target_dist=curr_dist,
+                total_target_ores_in_world=(
+                    self._total_target_ores_in_world
+                ),
             )
             self._prev_nearest_target_dist = curr_dist
 
-            # Spin penalty: penalise 3+ consecutive same-direction turns
+            # Arrival bonus: one-time reward for reaching target depth
             s1_cfg = Stage1RewardConfig()
+            turtle_y = int(self._turtle.position[1])
+            y_min, y_max = self._ore_y_range
+            if (
+                not self._reached_target_depth
+                and y_min <= turtle_y <= y_max
+            ):
+                self._reached_target_depth = True
+                r_clear += s1_cfg.y_arrival_bonus
+
+            # Spin penalty: penalise 3+ consecutive same-direction turns
             if self._consecutive_turn_count >= 3:
                 r_ops += s1_cfg.spin_penalty
 
@@ -497,6 +532,20 @@ class MinecraftMiningEnv(gym.Env):
                 and not move_succeeded
             ):
                 r_ops += s1_cfg.noop_penalty
+
+            # Idle penalty: ramps with steps since last dig
+            if block_mined is not None:
+                self._steps_since_last_dig = 0
+            else:
+                self._steps_since_last_dig += 1
+            idle_over = (
+                self._steps_since_last_dig - s1_cfg.idle_penalty_grace
+            )
+            if idle_over > 0:
+                r_ops += max(
+                    -0.5,
+                    s1_cfg.idle_penalty_scale * idle_over,
+                )
 
             # Terminal completion bonus
             terminal_bonus = 0.0
