@@ -224,7 +224,7 @@ def compute_stage1_reward_components(
     cfg = stage1_config or _DEFAULT_S1_CFG
 
     r_harvest = 0.0
-    r_ops = 0.0
+    r_ops = cfg.time_penalty  # constant per-step cost
     new_waste_count = cumulative_waste_count
 
     if block_mined is not None:
@@ -248,14 +248,14 @@ def compute_stage1_reward_components(
                 ratio = min(
                     1.0, new_waste_count / cfg.waste_ramp,
                 )
-                r_ops = -cfg.waste_beta * ratio ** cfg.waste_alpha
+                r_ops += -cfg.waste_beta * ratio ** cfg.waste_alpha
         else:
             # Non-ore block (stone, dirt, etc.): waste
             new_waste_count += 1
             ratio = min(
                 1.0, new_waste_count / cfg.waste_ramp,
             )
-            r_ops = -cfg.waste_beta * ratio ** cfg.waste_alpha
+            r_ops += -cfg.waste_beta * ratio ** cfg.waste_alpha
 
     # Y-distance penalty: increases with distance from ore range
     y_min, y_max = ore_y_range

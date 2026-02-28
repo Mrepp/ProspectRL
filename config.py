@@ -466,6 +466,14 @@ class Stage1RewardConfig:
     # No-op penalty — applied when a movement action fails
     noop_penalty: float = -0.05
 
+    # Per-step time penalty — small constant cost to discourage idle looping
+    time_penalty: float = -0.01
+
+    # Loiter penalty — penalises staying in a small area
+    loiter_window: int = 20
+    loiter_penalty: float = -0.15
+    loiter_unique_threshold: int = 5
+
     # Per-ore reward multipliers (inverse-abundance scaling).
     # Equalizes effective reward-per-effort across ore types.
     ore_reward_multipliers: list[float] = field(default_factory=lambda: [
@@ -635,7 +643,7 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.15
-    ent_coef: float = 0.2
+    ent_coef: float = 0.3
     vf_coef: float = 0.75
     max_grad_norm: float = 0.5
     normalize_advantage: bool = True

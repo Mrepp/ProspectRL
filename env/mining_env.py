@@ -10,6 +10,7 @@ Features:
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any
 
 import gymnasium as gym
@@ -264,6 +265,11 @@ class MinecraftMiningEnv(gym.Env):
         self._consecutive_turn_count: int = 0
         self._last_turn_direction: int | None = None
 
+        # Loiter detection state (rolling window of recent positions)
+        self._recent_positions: deque[tuple[int, int, int]] = deque(
+            maxlen=Stage1RewardConfig().loiter_window,
+        )
+
     # ------------------------------------------------------------------
     # Gymnasium API
     # ------------------------------------------------------------------
@@ -355,6 +361,9 @@ class MinecraftMiningEnv(gym.Env):
         self._consecutive_turn_count = 0
         self._last_turn_direction = None
 
+        # Loiter detection reset
+        self._recent_positions.clear()
+
         # Stage 1: count target ores, reset waste, compute Y-range
         if self._is_stage1:
             self._total_target_ores_in_world = (
@@ -429,6 +438,9 @@ class MinecraftMiningEnv(gym.Env):
         is_new_position = tp not in self._explored
         self._explored.add(tp)
 
+        # Loiter tracking: record position in rolling window
+        self._recent_positions.append(tp)
+
         # Handle infinite fuel
         if self._stage_cfg.infinite_fuel:
             self._turtle.fuel = self._turtle.max_fuel
@@ -470,6 +482,12 @@ class MinecraftMiningEnv(gym.Env):
             s1_cfg = Stage1RewardConfig()
             if self._consecutive_turn_count >= 3:
                 r_ops += s1_cfg.spin_penalty
+
+            # Loiter penalty: penalise staying in a small area
+            if len(self._recent_positions) >= s1_cfg.loiter_window:
+                unique = len(set(self._recent_positions))
+                if unique < s1_cfg.loiter_unique_threshold:
+                    r_ops += s1_cfg.loiter_penalty
 
             # No-op penalty: movement action that failed
             if (

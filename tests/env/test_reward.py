@@ -917,7 +917,8 @@ class TestStage1Reward:
             cumulative_waste_count=500,  # way over ramp
             is_new_position=False,
         )
-        assert r_ops >= -_S1_CFG.waste_beta
+        # r_ops = time_penalty + waste_penalty
+        assert r_ops >= _S1_CFG.time_penalty - _S1_CFG.waste_beta
 
     def test_exploration_bonus_on_new_cell(self) -> None:
         """New position gives exploration bonus."""
@@ -975,8 +976,8 @@ class TestStage1Reward:
         )
         assert mined[3] == 1.0
 
-    def test_no_ops_when_no_dig(self) -> None:
-        """No waste penalty when no block is mined."""
+    def test_time_penalty_when_no_dig(self) -> None:
+        """Time penalty applies even when no block is mined."""
         pref = _make_pref(0)
         mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
 
@@ -987,8 +988,39 @@ class TestStage1Reward:
             cumulative_waste_count=50,
             is_new_position=False,
         )
-        assert r_ops == 0.0
+        assert r_ops == pytest.approx(_S1_CFG.time_penalty)
         assert new_waste == 50  # unchanged
+
+
+    def test_time_penalty_stacks_with_waste(self) -> None:
+        """Time penalty is added on top of waste penalty."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, _, r_ops, _ = compute_stage1_reward_components(
+            block_mined=int(BlockType.STONE),
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+        )
+        # Should be time_penalty + waste penalty (both negative)
+        assert r_ops < _S1_CFG.time_penalty
+
+    def test_time_penalty_on_target_ore_step(self) -> None:
+        """r_ops includes time penalty even on target ore steps."""
+        pref = _make_pref(3)  # diamond
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, _, r_ops, _ = compute_stage1_reward_components(
+            block_mined=int(BlockType.DIAMOND_ORE),
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+        )
+        # Target ore has no waste penalty, only time penalty
+        assert r_ops == pytest.approx(_S1_CFG.time_penalty)
 
 
 class TestStage1TerminalBonus:
