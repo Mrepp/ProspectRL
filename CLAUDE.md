@@ -38,18 +38,20 @@ R = harvest_alpha * r_harvest + r_adjacent + r_clear + r_ops
 
 ### Stage 1: Immediate Per-Ore Rewards (`Stage1RewardConfig`)
 
-Stage 1 is the entry curriculum (dense world, infinite fuel, one-hot preference). Designed for fast initial learning.
+Stage 1 is the entry curriculum (dense world, infinite fuel, one-hot preference). Primary goal: learn to navigate to the correct Y-level for the target ore type and mine there.
 
 | Component | Parameter | Default | Formula / Justification |
 |---|---|---|---|
-| **Harvest (per-ore)** | `per_ore_reward` | `1.0` | Immediate reward = `1.0 * preference[ore_idx]` when a target ore is mined. Direct signal — no potential shaping needed at this stage. |
-| **Completion bonus** | `completion_scale` | `20.0` | Terminal bonus = `20.0 * (target_mined / target_in_world)`. Large end-of-episode incentive for maximizing target ore collection. |
-| **Waste penalty** | `waste_beta` | `0.02` | Penalty for mining non-target blocks. Ramps as `-(0.02) * (waste_count / waste_ramp)^alpha`. Soft penalty — kept small in Stage 1 to avoid discouraging exploration. |
-| | `waste_ramp` | `100` | Number of waste blocks over which the penalty ramps to full strength. |
-| | `waste_alpha` | `2.0` | Exponent — quadratic ramp makes early waste nearly free but penalizes sustained non-target mining. |
-| | `non_target_ore_multiplier` | `1.5` | Non-target *ores* count as 1.5x waste vs regular blocks (stone/dirt). Mining the wrong ore is worse than mining stone. |
-| **Exploration bonus** | `exploration_bonus` | `0.01` | Small per-step reward for visiting a new cell. Encourages spatial coverage. |
-| **Y-distance penalty** | `y_penalty_scale` | `0.03` | Per-step cost when outside target ore's Y-range. Scales linearly with distance: `-(0.03) * y_dist / world_height`. Guides the agent to the correct depth for its target ore. |
+| **Harvest (per-ore)** | `per_ore_reward` | `5.0` | Immediate reward = `5.0 * preference[ore_idx] * ore_multiplier` when a target ore is mined. Strong signal to dominate per-step costs. |
+| **Completion bonus** | `completion_scale` | `10.0` | Terminal bonus = `10.0 * (target_mined / target_in_world)`. End-of-episode incentive for maximizing target ore collection. |
+| **Waste penalty** | `waste_beta` | `0.05` | Penalty for mining non-target blocks. Ramps as `-(0.05) * (waste_count / waste_ramp)^alpha`. Kept soft — depth navigation is the priority over waste avoidance. |
+| | `waste_ramp` | `200` | Number of waste blocks over which the penalty ramps to full strength. Slow ramp lets agent build mining habit before refining. |
+| | `waste_alpha` | `1.5` | Exponent for waste penalty ramp. |
+| | `non_target_ore_multiplier` | `1.5` | Non-target *ores* count as 1.5x waste vs regular blocks (stone/dirt). |
+| **Exploration bonus** | `exploration_bonus` | `0.002` | Small per-step reward for visiting a new cell. Decays with `exploration_decay_halflife=50`. |
+| **Y-distance penalty** | `y_penalty_scale` | `1.0` | Per-step cost when outside target ore's Y-range: `-(1.0) * y_dist / world_height`. Primary depth-navigation signal. |
+| **Y-in-range bonus** | `y_in_range_bonus` | `0.01` | Per-step bonus when at the correct depth. Positive attractor that complements the Y-distance penalty. |
+| **Time penalty** | `time_penalty` | `-0.003` | Mild per-step cost. Low enough to not overwhelm depth/mining signals. |
 
 ### Scalarization
 

@@ -265,9 +265,13 @@ def compute_stage1_reward_components(
         y_dist = turtle_y - y_max
     else:
         y_dist = 0.0
-    r_adjacent = (
-        -cfg.y_penalty_scale * y_dist / max(world_height, 1)
-    )
+    if y_dist > 0:
+        r_adjacent = (
+            -cfg.y_penalty_scale * y_dist / max(world_height, 1)
+        )
+    else:
+        # Positive bonus for being at the correct depth
+        r_adjacent = cfg.y_in_range_bonus
 
     # Exploration bonus (progressive: strong early, decays with count)
     if is_new_position:

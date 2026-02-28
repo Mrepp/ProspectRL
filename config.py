@@ -433,14 +433,14 @@ class Stage1RewardConfig:
     """
 
     # Per-target-ore immediate reward
-    per_ore_reward: float = 3.0
+    per_ore_reward: float = 5.0
 
     # Terminal completion bonus
     completion_scale: float = 10.0
 
-    # Waste penalty (ramps fast to discourage indiscriminate mining)
-    waste_beta: float = 0.15
-    waste_ramp: int = 50
+    # Waste penalty (ramps slowly — let agent learn depth-first, refine later)
+    waste_beta: float = 0.05
+    waste_ramp: int = 200
     waste_alpha: float = 1.5
 
     # Exploration bonus per new cell visited (small — shouldn't compete
@@ -449,12 +449,15 @@ class Stage1RewardConfig:
     # Half-life for progressive decay: bonus halves after this many new cells
     exploration_decay_halflife: int = 50
 
-    # Non-target ore penalty multiplier (wrong ores = confused targeting)
-    non_target_ore_multiplier: float = 3.0
+    # Non-target ore penalty multiplier (wrong ores slightly worse than stone)
+    non_target_ore_multiplier: float = 1.5
 
     # Y-distance penalty: per-step cost when outside target
     # ore's Y range. Scales linearly with distance from range.
-    y_penalty_scale: float = 0.3
+    y_penalty_scale: float = 1.0
+
+    # Y-in-range bonus: small per-step reward for being at correct depth
+    y_in_range_bonus: float = 0.01
 
     # Approach bonus: reward for moving closer to nearest visible
     # target ore in the observation window (Change 3)
@@ -466,8 +469,8 @@ class Stage1RewardConfig:
     # No-op penalty — applied when a movement action fails
     noop_penalty: float = -0.05
 
-    # Per-step time penalty — small constant cost to discourage idle looping
-    time_penalty: float = -0.01
+    # Per-step time penalty — mild cost to discourage idle looping
+    time_penalty: float = -0.003
 
     # Loiter penalty — penalises staying in a small area
     loiter_window: int = 20
@@ -643,7 +646,7 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.15
-    ent_coef: float = 0.3
+    ent_coef: float = 0.05
     vf_coef: float = 0.75
     max_grad_norm: float = 0.5
     normalize_advantage: bool = True
