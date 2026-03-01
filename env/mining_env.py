@@ -248,6 +248,7 @@ class MinecraftMiningEnv(gym.Env):
         self._turtle: Turtle | None = None
         self._preference: np.ndarray | None = None
         self._explored: set[tuple[int, int, int]] = set()
+        self._explored_xz: set[tuple[int, int]] = set()
         self._step_count: int = 0
         self._max_steps: int = self._stage_cfg.max_episode_steps
 
@@ -320,9 +321,15 @@ class MinecraftMiningEnv(gym.Env):
                 forced_biome=self._forced_biome,
             )
 
-        # Place turtle at centre of the world (y above bedrock)
+        # Place turtle at centre X/Z, randomised Y within ±25% of centre
+        center_y = ws[1] // 2
+        jitter_range = max(1, ws[1] // 4)
+        spawn_y = int(self._rng.integers(
+            max(2, center_y - jitter_range),
+            min(ws[1] - 2, center_y + jitter_range) + 1,
+        ))
         start_pos = np.array(
-            [ws[0] // 2, max(1, ws[1] // 2), ws[2] // 2],
+            [ws[0] // 2, spawn_y, ws[2] // 2],
             dtype=np.int32,
         )
         # Clear the starting block so the turtle can stand there
@@ -342,6 +349,8 @@ class MinecraftMiningEnv(gym.Env):
         if self._fixed_ore_index is not None:
             pref = np.zeros(NUM_ORE_TYPES, dtype=np.float32)
             pref[self._fixed_ore_index] = 1.0
+            if self._is_stage1:
+                pref = self._ensure_achievable_preference(pref)
             self._preference = pref
         else:
             pref = self._pref_mgr.sample(
@@ -352,10 +361,12 @@ class MinecraftMiningEnv(gym.Env):
                 pref = self._ensure_achievable_preference(pref)
             self._preference = pref
 
-        # Explored set
+        # Explored sets
         self._explored = set()
+        self._explored_xz = set()
         tp = tuple(int(v) for v in self._turtle.position)
         self._explored.add(tp)
+        self._explored_xz.add((tp[0], tp[2]))
 
         self._step_count = 0
 
@@ -460,6 +471,11 @@ class MinecraftMiningEnv(gym.Env):
         is_new_position = tp not in self._explored
         self._explored.add(tp)
 
+        # Track XZ-plane exploration (new column visits)
+        xz = (tp[0], tp[2])
+        is_new_xz_position = xz not in self._explored_xz
+        self._explored_xz.add(xz)
+
         # Loiter tracking: record position in rolling window
         self._recent_positions.append(tp)
 
@@ -500,6 +516,8 @@ class MinecraftMiningEnv(gym.Env):
                 total_target_ores_in_world=(
                     self._total_target_ores_in_world
                 ),
+                is_new_xz_position=is_new_xz_position,
+                explored_xz_count=len(self._explored_xz),
             )
             self._prev_nearest_target_dist = curr_dist
 
@@ -929,4 +947,5 @@ class MinecraftMiningEnv(gym.Env):
             "facing": self._turtle.facing,
             "step": self._step_count,
             "explored_count": len(self._explored),
+            "explored_xz_count": len(self._explored_xz),
         }

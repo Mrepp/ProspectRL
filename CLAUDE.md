@@ -7,7 +7,7 @@ PPO-based RL for ComputerCraft turtle mining in Minecraft. A turtle agent learns
 ## Quick Reference
 
 - **Entry points**: `train.py` (training), `evaluate.py` (eval), `deployment/inference_server.py` (serve)
-- **Config source of truth**: `config.py` — all hyperparameters, block defs, curriculum stages, reward settings
+- **Config source of truth**: `config.py` — all hyperparameters, block defs, curriculum stages, reward settings. `OreTypeConfig` / `ORE_TYPE_CONFIGS` centralizes per-ore metadata (Y-range, vein size, biome).
 - **Reward logic**: `env/reward_vector.py` (component computation), `env/preference.py` (scalarization)
 - **Tests**: `pytest` from repo root
 
@@ -52,6 +52,8 @@ Stage 1 is the entry curriculum (dense world, infinite fuel, one-hot preference)
 | | `waste_alpha` | `1.5` | Exponent for waste penalty ramp. |
 | | `non_target_ore_multiplier` | `1.5` | Non-target *ores* count as 1.5x waste vs regular blocks (stone/dirt). |
 | **Exploration bonus** | `exploration_bonus` | `0.002` | Small per-step reward for visiting a new cell. Decays with `exploration_decay_halflife=50`. |
+| **XZ exploration bonus** | `xz_exploration_bonus` | `0.03` | Per new XZ column bonus when at correct Y-depth: `0.03 / (1 + xz_count / 80)`. Rewards horizontal spread at mining level; zero outside target Y-range. |
+| | `xz_exploration_decay_halflife` | `80` | Number of new XZ columns before bonus halves. |
 | **Y-distance penalty** | `y_penalty_scale` | `1.0` | Per-step cost when outside target ore's Y-range: `-(1.0) * y_dist / world_height`. Primary depth-navigation signal. |
 | **Y-in-range bonus** | `y_in_range_bonus` | `0.0` | Per-step bonus when at the correct depth (disabled by default). |
 | **Time penalty** | `time_penalty` | `-0.01` | Per-step cost to discourage idle looping. |

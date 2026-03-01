@@ -1088,3 +1088,140 @@ class TestStage1TerminalBonus:
             total_target_ores_in_world=100,
         )
         assert bonus == pytest.approx(_S1_CFG.completion_scale)
+
+
+class TestStage1XZExploration:
+    """Tests for XZ-plane exploration bonus in Stage 1."""
+
+    def test_xz_bonus_at_correct_depth(self) -> None:
+        """New XZ cell at correct Y-depth gives XZ exploration bonus."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, r_clear, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            turtle_y=10,
+            ore_y_range=(5.0, 15.0),
+            is_new_xz_position=True,
+            explored_xz_count=0,
+        )
+        assert r_clear == pytest.approx(_S1_CFG.xz_exploration_bonus)
+
+    def test_no_xz_bonus_outside_y_range(self) -> None:
+        """New XZ cell outside Y-range gives no XZ bonus."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, r_clear, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            turtle_y=25,
+            ore_y_range=(5.0, 15.0),
+            is_new_xz_position=True,
+            explored_xz_count=0,
+        )
+        assert r_clear == 0.0
+
+    def test_no_xz_bonus_on_revisit(self) -> None:
+        """Revisiting an XZ column gives no XZ bonus."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, r_clear, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            turtle_y=10,
+            ore_y_range=(5.0, 15.0),
+            is_new_xz_position=False,
+            explored_xz_count=50,
+        )
+        assert r_clear == 0.0
+
+    def test_xz_bonus_decays_with_count(self) -> None:
+        """XZ bonus decays as more XZ cells are explored."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        base_kwargs = dict(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            turtle_y=10,
+            ore_y_range=(5.0, 15.0),
+            is_new_xz_position=True,
+        )
+
+        _, _, r_early, _, _ = compute_stage1_reward_components(
+            **base_kwargs, explored_xz_count=0,
+        )
+        _, _, r_late, _, _ = compute_stage1_reward_components(
+            **base_kwargs, explored_xz_count=200,
+        )
+        assert r_early > r_late > 0.0
+
+    def test_xz_bonus_stacks_with_3d_exploration(self) -> None:
+        """XZ bonus and 3D exploration bonus can fire together."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, r_clear, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=True,
+            turtle_y=10,
+            ore_y_range=(5.0, 15.0),
+            is_new_xz_position=True,
+            explored_xz_count=0,
+            explored_count=0,
+        )
+        expected = (
+            _S1_CFG.exploration_bonus
+            + _S1_CFG.xz_exploration_bonus
+        )
+        assert r_clear == pytest.approx(expected)
+
+    def test_xz_bonus_at_y_range_boundary(self) -> None:
+        """XZ bonus fires exactly at the Y-range boundaries."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        base_kwargs = dict(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            ore_y_range=(5.0, 15.0),
+            is_new_xz_position=True,
+            explored_xz_count=0,
+        )
+
+        # At y_min boundary
+        _, _, r_at_min, _, _ = compute_stage1_reward_components(
+            **base_kwargs, turtle_y=5,
+        )
+        assert r_at_min == pytest.approx(_S1_CFG.xz_exploration_bonus)
+
+        # At y_max boundary
+        _, _, r_at_max, _, _ = compute_stage1_reward_components(
+            **base_kwargs, turtle_y=15,
+        )
+        assert r_at_max == pytest.approx(_S1_CFG.xz_exploration_bonus)
+
+        # One above y_max — no bonus
+        _, _, r_above, _, _ = compute_stage1_reward_components(
+            **base_kwargs, turtle_y=16,
+        )
+        assert r_above == 0.0

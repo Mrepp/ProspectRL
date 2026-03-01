@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from prospect_rl.config import Config, NUM_ORE_TYPES, ORE_FORCED_BIOME
+from prospect_rl.config import Config, NUM_ORE_TYPES, ORE_TYPE_CONFIGS
 from prospect_rl.env.mining_env import MinecraftMiningEnv
 from prospect_rl.models.policy_network import MiningFeatureExtractor
 from sb3_contrib import MaskablePPO
@@ -54,7 +54,7 @@ def make_training_env(
 
     def _make(i: int):
         ore_idx = i % NUM_ORE_TYPES
-        biome = ORE_FORCED_BIOME.get(ore_idx)
+        biome = ORE_TYPE_CONFIGS[ore_idx].forced_biome
 
         def _init():
             return MinecraftMiningEnv(

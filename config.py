@@ -90,12 +90,16 @@ class BiomeType(IntEnum):
 
 NUM_BIOME_TYPES: int = len(BiomeType)
 
-# Biome required for each ore type to guarantee spawning.
-# Only ores whose *every* spawn config requires a specific biome need
-# an entry here.  Absent means the ore spawns in all biomes.
-ORE_FORCED_BIOME: dict[int, int] = {
-    5: int(BiomeType.MOUNTAINS),  # Emerald only spawns in Mountains
-}
+@dataclass(frozen=True)
+class OreTypeConfig:
+    """Per-ore-type summary config. One entry per ore in ORE_TYPES order."""
+    name: str                                    # e.g. "coal", "diamond"
+    block_type: BlockType                        # e.g. BlockType.DIAMOND_ORE
+    ore_index: int                               # index in ORE_TYPES (0-7)
+    y_min_mc: int                                # union min across spawn configs
+    y_max_mc: int                                # union max across spawn configs
+    typical_vein_size: int                       # most common spawn_size
+    forced_biome: BiomeType | None = None        # None = spawns in all biomes
 
 
 # ---------------------------------------------------------------------------
@@ -163,9 +167,6 @@ class OreSpawnConfig:
     noise_scale: float = 20.0               # OpenSimplex scale for spatial clustering
     cluster_threshold: float = 0.5          # noise threshold for cluster formation
 
-
-# Keep legacy alias for backward compatibility during transition
-OreDistParams = OreSpawnConfig
 
 # -- Ore spawn configs (Minecraft Java Edition parity) ---------------------
 
@@ -252,14 +253,14 @@ ORE_SPAWN_CONFIGS: list[OreSpawnConfig] = [
     ),
     # Lapis Lazuli (2 configs)
     OreSpawnConfig(
-        BlockType.LAPIS_ORE, spawn_size=7, spawn_tries=2,
+        BlockType.LAPIS_ORE, spawn_size=7, spawn_tries=4,
         y_min_mc=-32, y_max_mc=32, distribution="triangle",
-        peak_mc=0, noise_scale=22, cluster_threshold=0.65,
+        peak_mc=0, noise_scale=10, cluster_threshold=0.45,
     ),
     OreSpawnConfig(
-        BlockType.LAPIS_ORE, spawn_size=7, spawn_tries=4,
+        BlockType.LAPIS_ORE, spawn_size=7, spawn_tries=6,
         y_min_mc=-64, y_max_mc=64, distribution="uniform",
-        air_exposure_skip=1.0, noise_scale=22, cluster_threshold=0.65,
+        air_exposure_skip=1.0, noise_scale=10, cluster_threshold=0.45,
     ),
     # Copper (2 configs)
     OreSpawnConfig(
@@ -337,63 +338,49 @@ FILLER_SPAWN_CONFIGS: list[OreSpawnConfig] = [
     ),
 ]
 
-# Legacy alias: old code imports ORE_DISTRIBUTIONS — point to new configs
-ORE_DISTRIBUTIONS: list[OreSpawnConfig] = ORE_SPAWN_CONFIGS
+def _build_ore_type_configs() -> list[OreTypeConfig]:
+    """Derive per-ore-type summary from raw spawn configs."""
+    _forced_biomes: dict[BlockType, BiomeType] = {
+        BlockType.EMERALD_ORE: BiomeType.MOUNTAINS,
+    }
+    configs = []
+    for i, ore_bt in enumerate(ORE_TYPES):
+        matching = [c for c in ORE_SPAWN_CONFIGS if c.block_type == ore_bt]
+        y_min = min(c.y_min_mc for c in matching)
+        y_max = max(c.y_max_mc for c in matching)
+        typical_vein = max(matching, key=lambda c: c.spawn_tries).spawn_size
+        name = ore_bt.name.lower().replace("_ore", "")
+        configs.append(OreTypeConfig(
+            name=name, block_type=ore_bt, ore_index=i,
+            y_min_mc=y_min, y_max_mc=y_max,
+            typical_vein_size=typical_vein,
+            forced_biome=_forced_biomes.get(ore_bt),
+        ))
+    return configs
+
+
+ORE_TYPE_CONFIGS: list[OreTypeConfig] = _build_ore_type_configs()
 
 
 def get_ore_y_ranges(world_height: int) -> list[tuple[float, float]]:
     """Return (y_min, y_max) simulation-Y range per ore type index.
 
-    Takes the union of all spawn configs for each ore type (widest
-    min to widest max), converted to simulation coordinates.
+    Derives from ``ORE_TYPE_CONFIGS`` MC Y-ranges, converted to
+    simulation coordinates.
     """
     ranges: list[tuple[float, float]] = []
-    for ore_bt in ORE_TYPES:
-        y_lo = float("inf")
-        y_hi = float("-inf")
-        for cfg in ORE_SPAWN_CONFIGS:
-            if cfg.block_type != ore_bt:
-                continue
-            sim_min = (cfg.y_min_mc - MC_Y_MIN) / MC_Y_RANGE * world_height
-            sim_max = (cfg.y_max_mc - MC_Y_MIN) / MC_Y_RANGE * world_height
-            y_lo = min(y_lo, sim_min)
-            y_hi = max(y_hi, sim_max)
-        # Clamp to world bounds
-        y_lo = max(0.0, y_lo)
-        y_hi = min(float(world_height - 1), y_hi)
-        ranges.append((y_lo, y_hi))
+    for otc in ORE_TYPE_CONFIGS:
+        sim_min = (otc.y_min_mc - MC_Y_MIN) / MC_Y_RANGE * world_height
+        sim_max = (otc.y_max_mc - MC_Y_MIN) / MC_Y_RANGE * world_height
+        sim_min = max(0.0, sim_min)
+        sim_max = min(float(world_height - 1), sim_max)
+        ranges.append((sim_min, sim_max))
     return ranges
 
 
 # ---------------------------------------------------------------------------
 # Reward Configuration
 # ---------------------------------------------------------------------------
-
-# DEPRECATED — use RewardConfig instead. Kept for backward compatibility.
-ORE_BASE_VALUES: dict[int, float] = {
-    BlockType.COAL_ORE: 1.0,
-    BlockType.IRON_ORE: 2.0,
-    BlockType.GOLD_ORE: 4.0,
-    BlockType.DIAMOND_ORE: 8.0,
-    BlockType.REDSTONE_ORE: 1.5,
-    BlockType.EMERALD_ORE: 6.0,
-    BlockType.LAPIS_ORE: 1.0,
-    BlockType.COPPER_ORE: 1.5,
-}
-
-# DEPRECATED — use RewardConfig instead. Kept for backward compatibility.
-COST_WEIGHTS: dict[str, float] = {
-    "movement": -0.01,
-    "dig": -0.005,
-    "fuel_penalty": -0.1,     # per step when fuel < 10% max
-    "death_penalty": -10.0,   # episode termination from fuel=0
-    "time_penalty": -0.001,   # per step, encourages efficiency
-    "exploration_bonus": 0.02,  # per step when visiting a new position
-}
-
-# DEPRECATED — use RewardConfig instead.
-REWARD_ALPHA: float = 1.0
-
 
 @dataclass
 class RewardConfig:
@@ -455,6 +442,12 @@ class Stage1RewardConfig:
     exploration_bonus: float = 0.002
     # Half-life for progressive decay: bonus halves after this many new cells
     exploration_decay_halflife: int = 50
+
+    # XZ-plane exploration bonus: rewards visiting new (x, z) columns
+    # when the agent is at the correct Y-depth for its target ore.
+    xz_exploration_bonus: float = 0.03
+    # Half-life for XZ exploration decay (in number of new XZ cells)
+    xz_exploration_decay_halflife: int = 80
 
     # Non-target ore penalty multiplier (wrong ores slightly worse than stone)
     non_target_ore_multiplier: float = 1.5

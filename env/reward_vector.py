@@ -202,6 +202,8 @@ def compute_stage1_reward_components(
     curr_nearest_target_dist: float = float("inf"),
     total_target_ores_in_world: int = 100,
     stage1_config: Stage1RewardConfig | None = None,
+    is_new_xz_position: bool = False,
+    explored_xz_count: int = 0,
 ) -> tuple[float, float, float, float, int]:
     """Compute Stage 1 reward components.
 
@@ -289,6 +291,15 @@ def compute_stage1_reward_components(
         )
     else:
         r_clear = 0.0
+
+    # XZ-plane exploration bonus: rewards horizontal spread at correct depth
+    if is_new_xz_position:
+        y_min, y_max = ore_y_range
+        if y_min <= turtle_y <= y_max:
+            xz_halflife = max(cfg.xz_exploration_decay_halflife, 1)
+            r_clear += cfg.xz_exploration_bonus / (
+                1.0 + explored_xz_count / xz_halflife
+            )
 
     # Approach shaping bonus: reward for moving closer to nearest
     # visible target ore in the observation window.

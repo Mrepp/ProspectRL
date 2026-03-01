@@ -672,6 +672,15 @@ class MultiTurtleVisualizer:
             traj = seg.trajectory
 
             step = min(self._current_step, len(traj.steps) - 1)
+
+            # Count target ores mined up to current step
+            target_ore_bt = int(ORE_TYPES[int(np.argmax(ts.preference))])
+            target_mined = 0
+            if step >= 0:
+                for s in range(step + 1):
+                    if traj.steps[s].block_mined is not None and int(traj.steps[s].block_mined) == target_ore_bt:
+                        target_mined += 1
+
             if step < 0:
                 reward_str = "+0.000"
                 action_str = "---"
@@ -694,7 +703,7 @@ class MultiTurtleVisualizer:
             hover = " *" if i == self._hovered_idx else ""
             lines.append(
                 f"[{i + 1}] {seg.preference_label:<10s} "
-                f"R:{reward_str}  {action_str:<4s} "
+                f"O:{target_mined:<3d} R:{reward_str}  {action_str:<4s} "
                 f"{pos_str}{marker}{hover}"
             )
 
