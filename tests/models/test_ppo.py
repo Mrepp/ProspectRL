@@ -38,8 +38,8 @@ class TestFeatureExtractor:
 
         obs_space = _make_obs_space()
         extractor = MiningFeatureExtractor(obs_space)
-        # 128 (CNN) + 32 (scalar MLP) + 8 (pref) = 168
-        assert extractor.features_dim == 168
+        # 256 (CNN) + 32 (scalar MLP) + 8 (pref) = 296
+        assert extractor.features_dim == 296
 
     def test_forward_pass(self) -> None:
         from prospect_rl.models.policy_network import MiningFeatureExtractor
@@ -56,7 +56,7 @@ class TestFeatureExtractor:
             "pref": torch.rand(2, NUM_ORE_TYPES),
         }
         out = extractor(obs)
-        assert out.shape == (2, 168)
+        assert out.shape == (2, 296)
 
     def test_pref_passed_through_unchanged(self) -> None:
         from prospect_rl.models.policy_network import MiningFeatureExtractor
@@ -81,6 +81,49 @@ class TestFeatureExtractor:
             out[0, -NUM_ORE_TYPES:].detach().numpy(),
             pref[0].numpy(),
         )
+
+
+    def test_film_changes_output_with_different_preference(self) -> None:
+        """FiLM conditioning should produce different CNN outputs for
+        different preferences."""
+        from prospect_rl.models.policy_network import MiningFeatureExtractor
+
+        obs_space = _make_obs_space()
+        extractor = MiningFeatureExtractor(obs_space)
+
+        voxels = torch.rand(
+            1, NUM_VOXEL_CHANNELS,
+            OBS_WINDOW_Y, OBS_WINDOW_X, OBS_WINDOW_Z,
+        )
+        scalars = torch.randn(1, SCALAR_OBS_DIM)
+
+        pref_coal = torch.zeros(1, NUM_ORE_TYPES)
+        pref_coal[0, 0] = 1.0
+        pref_diamond = torch.zeros(1, NUM_ORE_TYPES)
+        pref_diamond[0, 3] = 1.0
+
+        out_coal = extractor(
+            {"voxels": voxels, "scalars": scalars, "pref": pref_coal},
+        )
+        out_diamond = extractor(
+            {"voxels": voxels, "scalars": scalars, "pref": pref_diamond},
+        )
+
+        # CNN portion (first 256 dims) should differ due to FiLM
+        cnn_coal = out_coal[0, :256].detach()
+        cnn_diamond = out_diamond[0, :256].detach()
+        assert not torch.allclose(cnn_coal, cnn_diamond, atol=1e-6), (
+            "FiLM should produce different CNN outputs for different prefs"
+        )
+
+    def test_se_block_shapes(self) -> None:
+        """SE block should preserve spatial dimensions."""
+        from prospect_rl.models.policy_network import SqueezeExcitation3d
+
+        se = SqueezeExcitation3d(128, reduction=4)
+        x = torch.rand(2, 128, 4, 2, 2)
+        out = se(x)
+        assert out.shape == x.shape
 
 
 class TestPPOModel:
