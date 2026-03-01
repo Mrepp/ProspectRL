@@ -440,24 +440,30 @@ class Stage1RewardConfig:
     # Exploration bonus per new cell visited (small — shouldn't compete
     # with ore targeting)
     exploration_bonus: float = 0.002
-    # Half-life for progressive decay: bonus halves after this many new cells
-    exploration_decay_halflife: int = 50
+    # Fraction of world volume used as half-life: halflife = frac * volume
+    exploration_decay_frac: float = 0.003125
 
     # XZ-plane exploration bonus: rewards visiting new (x, z) columns
     # when the agent is at the correct Y-depth for its target ore.
     xz_exploration_bonus: float = 0.03
-    # Half-life for XZ exploration decay (in number of new XZ cells)
-    xz_exploration_decay_halflife: int = 80
+    # Fraction of XZ area used as half-life: halflife = frac * xz_area
+    xz_exploration_decay_frac: float = 0.2
 
     # Non-target ore penalty multiplier (wrong ores slightly worse than stone)
     non_target_ore_multiplier: float = 1.5
 
     # Y-distance penalty: per-step cost when outside target
-    # ore's Y range. Scales linearly with distance from range.
+    # ore's Y range. Quadratic scaling: -scale*(dist/height)^2 - base.
     y_penalty_scale: float = 1.0
+    # Constant per-step cost for being off-depth (even by 1 block)
+    y_penalty_base: float = 0.05
 
     # Y-in-range bonus: small per-step reward for being at correct depth
     y_in_range_bonus: float = 0.0
+
+    # Vertical progress shaping: reward for reducing Y-distance to target
+    # range. Potential-based: scale * (prev_frac - curr_frac).
+    y_progress_scale: float = 1.0
 
     # One-time bonus when the agent first reaches the target Y-range.
     # Compensates for navigation cost that varies by ore type.
@@ -569,13 +575,13 @@ class CurriculumStage:
 CURRICULUM_STAGES: list[CurriculumStage] = [
     CurriculumStage(
         name="stage1_dense_easy",
-        world_size=(20, 40, 20),
+        world_size=(40, 40, 40),
         ore_density_multiplier=10.0,
         infinite_fuel=True,
         max_fuel=10000,
         caves_enabled=False,
         preference_mode="one_hot",
-        max_episode_steps=500,
+        max_episode_steps=1000,
         advancement_metric="mean_reward",
         advancement_threshold=25.0,
         advancement_window=100,

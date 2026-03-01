@@ -267,6 +267,7 @@ class MinecraftMiningEnv(gym.Env):
         self._total_target_ores_in_world: int = 0
         self._ore_y_range: tuple[float, float] = (0.0, 39.0)
         self._prev_nearest_target_dist: float = float("inf")
+        self._prev_y_dist: float = 0.0
 
         # Spin detection state
         self._consecutive_turn_count: int = 0
@@ -405,6 +406,15 @@ class MinecraftMiningEnv(gym.Env):
             self._cumulative_waste_count = 0
             self._ore_y_range = self._compute_ore_y_range()
             self._prev_nearest_target_dist = float("inf")
+            # Compute initial Y-distance for progress shaping
+            spawn_y = int(self._turtle.position[1])
+            y_min, y_max = self._ore_y_range
+            if spawn_y < y_min:
+                self._prev_y_dist = y_min - spawn_y
+            elif spawn_y > y_max:
+                self._prev_y_dist = spawn_y - y_max
+            else:
+                self._prev_y_dist = 0.0
 
         obs = self._build_obs()
         info = self._build_info()
@@ -509,6 +519,7 @@ class MinecraftMiningEnv(gym.Env):
                 turtle_y=int(self._turtle.position[1]),
                 ore_y_range=self._ore_y_range,
                 world_height=self._stage_cfg.world_size[1],
+                world_size=self._stage_cfg.world_size,
                 prev_nearest_target_dist=(
                     self._prev_nearest_target_dist
                 ),
@@ -518,8 +529,18 @@ class MinecraftMiningEnv(gym.Env):
                 ),
                 is_new_xz_position=is_new_xz_position,
                 explored_xz_count=len(self._explored_xz),
+                prev_y_dist=self._prev_y_dist,
             )
             self._prev_nearest_target_dist = curr_dist
+            # Update prev_y_dist for next step's progress shaping
+            turtle_y_now = int(self._turtle.position[1])
+            y_lo, y_hi = self._ore_y_range
+            if turtle_y_now < y_lo:
+                self._prev_y_dist = y_lo - turtle_y_now
+            elif turtle_y_now > y_hi:
+                self._prev_y_dist = turtle_y_now - y_hi
+            else:
+                self._prev_y_dist = 0.0
 
             # Arrival bonus: one-time reward for reaching target depth
             s1_cfg = Stage1RewardConfig()
@@ -624,6 +645,7 @@ class MinecraftMiningEnv(gym.Env):
         info["r_ops"] = r_ops
         info["harvest_potential"] = self._potential
         info["block_mined"] = block_mined
+        info["is_stage1"] = self._is_stage1
 
         # Stage 1 specific info
         if self._is_stage1:

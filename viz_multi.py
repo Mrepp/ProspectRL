@@ -1090,7 +1090,7 @@ class MultiTurtleVisualizer:
         if self._world_size:
             size = self._world_size
         else:
-            size = (20, 40, 20)
+            size = (40, 40, 40)
         center = np.array([size[0] / 2, size[1] / 2, size[2] / 2])
         max_dim = max(size)
         pl.camera.focal_point = center

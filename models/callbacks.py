@@ -87,7 +87,7 @@ class MetricsCallback(BaseCallback):
         super().__init__(verbose)
         self._episode_blocks: dict[int, list[int]] = {}
         self._episode_harvest: dict[int, list[float]] = {}
-        self._episode_adjacent: dict[int, list[float]] = {}
+        self._episode_r_adjacent: dict[int, list[float]] = {}
         self._episode_clears: dict[int, int] = {}
 
     def _on_step(self) -> bool:
@@ -107,7 +107,7 @@ class MetricsCallback(BaseCallback):
             self._episode_harvest.setdefault(i, []).append(
                 r_harvest,
             )
-            self._episode_adjacent.setdefault(i, []).append(
+            self._episode_r_adjacent.setdefault(i, []).append(
                 r_adjacent,
             )
             if r_clear > 0:
@@ -155,9 +155,14 @@ class MetricsCallback(BaseCallback):
                     "mining/cumulative_harvest_delta",
                     sum(self._episode_harvest.pop(i, [])),
                 )
+                adj_metric = (
+                    "mining/cumulative_y_penalty"
+                    if info.get("is_stage1")
+                    else "mining/cumulative_adjacent_penalty"
+                )
                 self.logger.record(
-                    "mining/cumulative_adjacent_penalty",
-                    sum(self._episode_adjacent.pop(i, [])),
+                    adj_metric,
+                    sum(self._episode_r_adjacent.pop(i, [])),
                 )
                 self.logger.record(
                     "mining/local_clears",

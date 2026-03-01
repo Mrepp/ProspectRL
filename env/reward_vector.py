@@ -198,12 +198,14 @@ def compute_stage1_reward_components(
     turtle_y: int = 0,
     ore_y_range: tuple[float, float] = (0.0, 39.0),
     world_height: int = 40,
+    world_size: tuple[int, int, int] = (40, 40, 40),
     prev_nearest_target_dist: float = float("inf"),
     curr_nearest_target_dist: float = float("inf"),
     total_target_ores_in_world: int = 100,
     stage1_config: Stage1RewardConfig | None = None,
     is_new_xz_position: bool = False,
     explored_xz_count: int = 0,
+    prev_y_dist: float = 0.0,
 ) -> tuple[float, float, float, float, int]:
     """Compute Stage 1 reward components.
 
@@ -267,7 +269,7 @@ def compute_stage1_reward_components(
             )
             r_ops += -cfg.waste_beta * ratio ** cfg.waste_alpha
 
-    # Y-distance penalty: increases with distance from ore range
+    # Y-distance penalty: quadratic scaling with constant base cost
     y_min, y_max = ore_y_range
     if turtle_y < y_min:
         y_dist = y_min - turtle_y
@@ -276,27 +278,34 @@ def compute_stage1_reward_components(
     else:
         y_dist = 0.0
     if y_dist > 0:
-        r_adjacent = (
-            -cfg.y_penalty_scale * y_dist / max(world_height, 1)
-        )
+        frac = y_dist / max(world_height, 1)
+        r_adjacent = -cfg.y_penalty_scale * frac * frac - cfg.y_penalty_base
     else:
         # Positive bonus for being at the correct depth
         r_adjacent = cfg.y_in_range_bonus
 
     # Exploration bonus (progressive: strong early, decays with count)
     if is_new_position:
-        halflife = max(cfg.exploration_decay_halflife, 1)
+        volume = world_size[0] * world_size[1] * world_size[2]
+        halflife = max(int(cfg.exploration_decay_frac * volume), 1)
         r_clear = cfg.exploration_bonus / (
             1.0 + explored_count / halflife
         )
     else:
         r_clear = 0.0
 
+    # Vertical progress shaping: reward for reducing Y-distance
+    wh = max(world_height, 1)
+    prev_frac = prev_y_dist / wh
+    curr_frac = y_dist / wh
+    r_clear += cfg.y_progress_scale * (prev_frac - curr_frac)
+
     # XZ-plane exploration bonus: rewards horizontal spread at correct depth
     if is_new_xz_position:
         y_min, y_max = ore_y_range
         if y_min <= turtle_y <= y_max:
-            xz_halflife = max(cfg.xz_exploration_decay_halflife, 1)
+            xz_area = world_size[0] * world_size[2]
+            xz_halflife = max(int(cfg.xz_exploration_decay_frac * xz_area), 1)
             r_clear += cfg.xz_exploration_bonus / (
                 1.0 + explored_xz_count / xz_halflife
             )

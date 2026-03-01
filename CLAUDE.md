@@ -51,11 +51,14 @@ Stage 1 is the entry curriculum (dense world, infinite fuel, one-hot preference)
 | | `waste_ramp` | `200` | Number of waste blocks over which the penalty ramps to full strength. Slow ramp lets agent build mining habit before refining. |
 | | `waste_alpha` | `1.5` | Exponent for waste penalty ramp. |
 | | `non_target_ore_multiplier` | `1.5` | Non-target *ores* count as 1.5x waste vs regular blocks (stone/dirt). |
-| **Exploration bonus** | `exploration_bonus` | `0.002` | Small per-step reward for visiting a new cell. Decays with `exploration_decay_halflife=50`. |
-| **XZ exploration bonus** | `xz_exploration_bonus` | `0.03` | Per new XZ column bonus when at correct Y-depth: `0.03 / (1 + xz_count / 80)`. Rewards horizontal spread at mining level; zero outside target Y-range. |
-| | `xz_exploration_decay_halflife` | `80` | Number of new XZ columns before bonus halves. |
-| **Y-distance penalty** | `y_penalty_scale` | `1.0` | Per-step cost when outside target ore's Y-range: `-(1.0) * y_dist / world_height`. Primary depth-navigation signal. |
+| **Exploration bonus** | `exploration_bonus` | `0.002` | Small per-step reward for visiting a new cell. Decays with halflife = `exploration_decay_frac * volume`. |
+| | `exploration_decay_frac` | `0.003125` | Fraction of world volume used as halflife. E.g. 40x40x40 → halflife=200. |
+| **XZ exploration bonus** | `xz_exploration_bonus` | `0.03` | Per new XZ column bonus when at correct Y-depth: `0.03 / (1 + xz_count / halflife)`. Rewards horizontal spread at mining level; zero outside target Y-range. |
+| | `xz_exploration_decay_frac` | `0.2` | Fraction of XZ area used as halflife. E.g. 40x40 → halflife=320. |
+| **Y-distance penalty** | `y_penalty_scale` | `1.0` | Per-step cost when outside target ore's Y-range: `-(1.0) * (y_dist / world_height)^2 - y_penalty_base`. Quadratic scaling makes large distances much worse. Primary depth-navigation signal. |
+| | `y_penalty_base` | `0.05` | Constant per-step cost for being off-depth (even by 1 block). |
 | **Y-in-range bonus** | `y_in_range_bonus` | `0.0` | Per-step bonus when at the correct depth (disabled by default). |
+| **Vertical progress** | `y_progress_scale` | `1.0` | Potential-based shaping: `scale * (prev_y_frac - curr_y_frac)`. Rewards movement toward target Y-range. Added to r_clear. |
 | **Time penalty** | `time_penalty` | `-0.01` | Per-step cost to discourage idle looping. |
 | **Idle penalty** | `idle_penalty_scale` | `-0.005` | Ramps with steps since last dig: `max(-0.5, -0.005 * (steps - grace))`. Grace period = 10 steps. |
 
@@ -84,7 +87,7 @@ R = harvest_alpha * r_harvest + r_adjacent + r_clear + r_ops
 
 | Stage | Name | World Size | Ore Density | Fuel | Caves | Preference | Max Steps |
 |---|---|---|---|---|---|---|---|
-| 0 | `stage1_dense_easy` | 20x40x20 | 10x | Infinite | No | one_hot | 500 |
+| 0 | `stage1_dense_easy` | 40x40x40 | 10x | Infinite | No | one_hot | 1000 |
 | 1 | `stage2_sparse_fuel` | 32x64x32 | 3x | 500 | No | one_hot | 800 |
 | 2 | `stage3_realistic_mixed` | 48x96x48 | 1x | 500 | No | two_mix | 1000 |
 | 3 | `stage4_caves_dirichlet` | 64x128x64 | 1x | 800 | Yes | dirichlet | 1500 |

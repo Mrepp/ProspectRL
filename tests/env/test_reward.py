@@ -1126,6 +1126,7 @@ class TestStage1XZExploration:
             ore_y_range=(5.0, 15.0),
             is_new_xz_position=True,
             explored_xz_count=0,
+            prev_y_dist=10.0,  # match current y_dist so progress = 0
         )
         assert r_clear == 0.0
 
@@ -1220,8 +1221,134 @@ class TestStage1XZExploration:
         )
         assert r_at_max == pytest.approx(_S1_CFG.xz_exploration_bonus)
 
-        # One above y_max — no bonus
+        # One above y_max — no bonus (prev_y_dist=1 matches current y_dist)
         _, _, r_above, _, _ = compute_stage1_reward_components(
-            **base_kwargs, turtle_y=16,
+            **base_kwargs, turtle_y=16, prev_y_dist=1.0,
         )
         assert r_above == 0.0
+
+
+class TestStage1QuadraticYPenalty:
+    """Tests for quadratic Y-distance penalty in Stage 1."""
+
+    def test_quadratic_scaling(self) -> None:
+        """Y-penalty uses quadratic scaling with base cost."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, r_adj, _, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            turtle_y=25,
+            ore_y_range=(5.0, 15.0),
+            world_height=40,
+            prev_y_dist=10.0,
+        )
+        # y_dist=10, frac=10/40=0.25, penalty = -(1.0*0.0625) - 0.05
+        expected = -_S1_CFG.y_penalty_scale * 0.25 ** 2 - _S1_CFG.y_penalty_base
+        assert r_adj == pytest.approx(expected)
+
+    def test_penalty_steeper_at_large_distance(self) -> None:
+        """Quadratic penalty grows faster for large distances."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+        base_kwargs = dict(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            ore_y_range=(0.0, 8.0),
+            world_height=40,
+        )
+
+        _, r_near, _, _, _ = compute_stage1_reward_components(
+            **base_kwargs, turtle_y=12, prev_y_dist=4.0,
+        )
+        _, r_far, _, _, _ = compute_stage1_reward_components(
+            **base_kwargs, turtle_y=28, prev_y_dist=20.0,
+        )
+        # Both should be negative, far should be worse
+        assert r_near < 0
+        assert r_far < r_near
+
+    def test_no_penalty_in_range(self) -> None:
+        """No Y-penalty when at correct depth."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, r_adj, _, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            turtle_y=10,
+            ore_y_range=(5.0, 15.0),
+        )
+        assert r_adj == _S1_CFG.y_in_range_bonus
+
+
+class TestStage1VerticalProgress:
+    """Tests for vertical progress shaping in Stage 1."""
+
+    def test_positive_reward_for_closing_distance(self) -> None:
+        """Moving closer to target Y-range gives positive r_clear."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, r_clear, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            turtle_y=20,
+            ore_y_range=(5.0, 15.0),
+            world_height=40,
+            prev_y_dist=6.0,  # was 6 blocks away, now 5
+        )
+        # y_dist=5, progress = 1.0*(6/40 - 5/40) = 0.025
+        assert r_clear == pytest.approx(
+            _S1_CFG.y_progress_scale * (6.0 / 40 - 5.0 / 40),
+        )
+
+    def test_negative_reward_for_increasing_distance(self) -> None:
+        """Moving away from target Y-range gives negative r_clear."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, r_clear, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            turtle_y=22,
+            ore_y_range=(5.0, 15.0),
+            world_height=40,
+            prev_y_dist=6.0,  # was 6 blocks away, now 7
+        )
+        # y_dist=7, progress = 1.0*(6/40 - 7/40) = -0.025
+        assert r_clear < 0
+
+    def test_zero_progress_when_stationary(self) -> None:
+        """No progress reward when Y-distance unchanged."""
+        pref = _make_pref(0)
+        mined = np.zeros(NUM_ORE_TYPES, dtype=np.float64)
+
+        _, _, r_clear, _, _ = compute_stage1_reward_components(
+            block_mined=None,
+            preference=pref,
+            mined_ore_counts=mined,
+            cumulative_waste_count=0,
+            is_new_position=False,
+            turtle_y=20,
+            ore_y_range=(5.0, 15.0),
+            world_height=40,
+            prev_y_dist=5.0,  # same as current y_dist
+        )
+        assert r_clear == pytest.approx(0.0)
