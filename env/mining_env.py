@@ -320,6 +320,9 @@ class MinecraftMiningEnv(gym.Env):
                 ),
                 caves_enabled=self._stage_cfg.caves_enabled,
                 forced_biome=self._forced_biome,
+                ore_density_overrides=(
+                    self._stage_cfg.ore_density_overrides
+                ),
             )
 
         # Place turtle at centre X/Z, randomised Y within ±25% of centre
@@ -489,6 +492,24 @@ class MinecraftMiningEnv(gym.Env):
         # Loiter tracking: record position in rolling window
         self._recent_positions.append(tp)
 
+        # Coal refueling: restore fuel when coal is mined
+        self._fuel_restored_this_step = 0
+        if (
+            block_mined is not None
+            and block_mined == int(BlockType.COAL_ORE)
+            and self._stage_cfg.coal_fuel_value > 0
+            and not self._stage_cfg.infinite_fuel
+        ):
+            fuel_to_add = self._stage_cfg.coal_fuel_value
+            new_fuel = min(
+                self._turtle.fuel + fuel_to_add,
+                self._turtle.max_fuel,
+            )
+            self._fuel_restored_this_step = (
+                new_fuel - self._turtle.fuel
+            )
+            self._turtle.fuel = new_fuel
+
         # Handle infinite fuel
         if self._stage_cfg.infinite_fuel:
             self._turtle.fuel = self._turtle.max_fuel
@@ -630,6 +651,19 @@ class MinecraftMiningEnv(gym.Env):
                 spin_cfg = RewardConfig()
                 r_ops += spin_cfg.spin_penalty
 
+            # Coal refuel bonus: incentivize mining coal for fuel
+            if (
+                self._fuel_restored_this_step > 0
+                and self._stage_cfg.coal_refuel_bonus > 0
+            ):
+                fuel_frac = self._turtle.fuel / max(
+                    self._turtle.max_fuel, 1,
+                )
+                need_factor = 1.0 - fuel_frac
+                r_ops += self._stage_cfg.coal_refuel_bonus * (
+                    0.5 + 0.5 * need_factor
+                )
+
             reward = PreferenceManager.scalarize(
                 r_harvest, r_adjacent, r_clear, r_ops,
             )
@@ -646,6 +680,7 @@ class MinecraftMiningEnv(gym.Env):
         info["harvest_potential"] = self._potential
         info["block_mined"] = block_mined
         info["is_stage1"] = self._is_stage1
+        info["fuel_restored"] = self._fuel_restored_this_step
 
         # Stage 1 specific info
         if self._is_stage1:

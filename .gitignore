@@ -48,3 +48,6 @@ coverage.xml
 .env
 *.pem
 *.key
+
+# For now
+./claude

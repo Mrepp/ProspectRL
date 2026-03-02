@@ -34,6 +34,7 @@ R = harvest_alpha * r_harvest + r_adjacent + r_clear + r_ops
 | **Local clear bonus** | `local_clear_bonus` | `0.5` | One-time bonus when all adjacent desired ores are cleared (post-action weight drops to 0 from a positive pre-action weight). Rewards thorough local extraction. |
 | **Fuel penalty** | `fuel_critical_threshold` | `0.2` | Fuel fraction below which the progressive penalty activates. |
 | | `fuel_critical_penalty` | `-1.0` | Maximum penalty per step at fuel = 0. Ramps quadratically: `-1.0 * ((1 - fuel_frac / 0.2)^2)`. Replaces a hard death penalty with a smooth gradient. |
+| **Coal refuel bonus** | `coal_refuel_bonus` | `0.1` (Stage 2) | Bonus added to `r_ops` when coal is mined for fuel. Scales with need: `bonus * (0.5 + 0.5 * (1 - fuel_frac))`. Range: 0.05 (full) to 0.10 (empty). Configured per-stage on `CurriculumStage`. |
 | **Time penalty** | `time_penalty` | `-0.005` | Constant per-step cost. Encourages the agent to mine efficiently rather than wander. |
 
 ### Stage 1: Immediate Per-Ore Rewards (`Stage1RewardConfig`)
@@ -85,10 +86,18 @@ R = harvest_alpha * r_harvest + r_adjacent + r_clear + r_ops
 
 ## Curriculum Stages
 
-| Stage | Name | World Size | Ore Density | Fuel | Caves | Preference | Max Steps |
-|---|---|---|---|---|---|---|---|
-| 0 | `stage1_dense_easy` | 40x40x40 | 10x | Infinite | No | one_hot | 1000 |
-| 1 | `stage2_sparse_fuel` | 32x64x32 | 3x | 500 | No | one_hot | 800 |
-| 2 | `stage3_realistic_mixed` | 48x96x48 | 1x | 500 | No | two_mix | 1000 |
-| 3 | `stage4_caves_dirichlet` | 64x128x64 | 1x | 800 | Yes | dirichlet | 1500 |
-| 4 | `stage5_full` | 128x256x128 | 1x | 1000 | Yes | dirichlet | 2000 |
+| Stage | Name | World Size | Ore Density | Fuel | Coal Refuel | Caves | Preference | Max Steps |
+|---|---|---|---|---|---|---|---|---|
+| 0 | `stage1_dense_easy` | 40x40x40 | 10x | Infinite | No | No | one_hot | 1000 |
+| 1 | `stage2_sparse_fuel` | 32x64x32 | 3x (coal 1x) | 200 | 16/coal | No | one_hot | 2000 |
+| 2 | `stage3_realistic_mixed` | 48x96x48 | 1x | 500 | No | No | two_mix | 1000 |
+| 3 | `stage4_caves_dirichlet` | 64x128x64 | 1x | 800 | No | Yes | dirichlet | 1500 |
+| 4 | `stage5_full` | 128x256x128 | 1x | 1000 | No | Yes | dirichlet | 2000 |
+
+### Stage 2 Coal Refueling
+
+Stage 2 introduces **coal-based fuel management**. The agent starts with 200 fuel (each movement costs 1). Mining coal ore restores 16 fuel (capped at max_fuel=200). Coal spawns at realistic 1x density while other ores use the 3x training multiplier via `ore_density_overrides`.
+
+- **Refueling**: Applied in `mining_env.py step()` after dig, before termination check. Agent can mine coal at fuel=0 (digs are free) to survive.
+- **Refuel bonus**: Small reward (0.05-0.10) added to `r_ops` when coal is mined. Scales with fuel need — higher bonus when fuel is lower.
+- **Per-ore density**: `CurriculumStage.ore_density_overrides` dict overrides the global `ore_density_multiplier` for specific block types. Passed through `World` → `OreDistributor.place_ores()`.

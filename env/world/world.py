@@ -38,6 +38,7 @@ class World:
         ore_density_multiplier: float = 1.0,
         caves_enabled: bool = True,
         forced_biome: int | None = None,
+        ore_density_overrides: dict[int, float] | None = None,
         **kwargs: Any,
     ) -> None:
         self._size = size
@@ -45,6 +46,7 @@ class World:
         self._ore_density_multiplier = ore_density_multiplier
         self._caves_enabled = caves_enabled
         self._forced_biome = forced_biome
+        self._ore_density_overrides = ore_density_overrides
         self._cave_config = CaveConfig()
 
         self._blocks: np.ndarray = np.empty(0, dtype=np.int8)
@@ -225,6 +227,7 @@ class World:
             self._seed,
             density_multiplier=self._ore_density_multiplier,
             biome_map=self._biome_map,
+            ore_density_overrides=self._ore_density_overrides,
         )
 
         # 7. Carve caves

@@ -570,6 +570,12 @@ class CurriculumStage:
     advancement_metric: str
     advancement_threshold: float
     advancement_window: int  # episodes to average over
+    # Optional per-ore density overrides: {int(BlockType) -> multiplier}
+    ore_density_overrides: dict[int, float] | None = None
+    # Coal refueling: fuel restored per coal mined (0 = disabled)
+    coal_fuel_value: int = 0
+    # Reward bonus for refueling via coal (0.0 = disabled)
+    coal_refuel_bonus: float = 0.0
 
 
 CURRICULUM_STAGES: list[CurriculumStage] = [
@@ -591,13 +597,16 @@ CURRICULUM_STAGES: list[CurriculumStage] = [
         world_size=(32, 64, 32),
         ore_density_multiplier=3.0,
         infinite_fuel=False,
-        max_fuel=500,
+        max_fuel=200,
         caves_enabled=False,
         preference_mode="one_hot",
-        max_episode_steps=800,
+        max_episode_steps=2000,
         advancement_metric="mean_ore_per_episode",
         advancement_threshold=5.0,
         advancement_window=100,
+        ore_density_overrides={int(BlockType.COAL_ORE): 1.0},
+        coal_fuel_value=16,
+        coal_refuel_bonus=0.1,
     ),
     CurriculumStage(
         name="stage3_realistic_mixed",

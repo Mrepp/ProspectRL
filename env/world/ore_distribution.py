@@ -89,6 +89,7 @@ class OreDistributor:
         seed: int,
         density_multiplier: float = 1.0,
         biome_map: np.ndarray | None = None,
+        ore_density_overrides: dict[int, float] | None = None,
     ) -> np.ndarray:
         """Place all ore types into the world grid in-place.
 
@@ -105,6 +106,10 @@ class OreDistributor:
             Scales the base probability of every ore type.
         biome_map:
             Optional 2D array of shape ``(sx, sz)`` with BiomeType values.
+        ore_density_overrides:
+            Per-ore multiplier overrides keyed by ``int(BlockType)``.
+            When present, completely replaces ``density_multiplier``
+            for that ore type.
 
         Returns
         -------
@@ -117,10 +122,16 @@ class OreDistributor:
         )
 
         for i, cfg in enumerate(ORE_SPAWN_CONFIGS):
+            effective_mult = density_multiplier
+            if ore_density_overrides is not None:
+                block_id = int(cfg.block_type)
+                if block_id in ore_density_overrides:
+                    effective_mult = ore_density_overrides[block_id]
+
             _place_single_block(
                 world_blocks, cfg, size,
                 seed=seed + i * 1000,
-                density_multiplier=density_multiplier,
+                density_multiplier=effective_mult,
                 biome_map=biome_map,
                 replace_mask=replaceable,
             )
