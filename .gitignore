@@ -28,6 +28,8 @@ Thumbs.db
 checkpoints/
 tb_logs/
 exports/
+data/chunk_cache/
+data/worlds/
 *.zip
 *.pkl
 wandb/

@@ -445,7 +445,7 @@ class Stage1RewardConfig:
 
     # XZ-plane exploration bonus: rewards visiting new (x, z) columns
     # when the agent is at the correct Y-depth for its target ore.
-    xz_exploration_bonus: float = 0.03
+    xz_exploration_bonus: float = 0.01
     # Fraction of XZ area used as half-life: halflife = frac * xz_area
     xz_exploration_decay_frac: float = 0.2
 
@@ -469,9 +469,9 @@ class Stage1RewardConfig:
     # Compensates for navigation cost that varies by ore type.
     y_arrival_bonus: float = 3.0
 
-    # Approach bonus: reward for moving closer to nearest visible
-    # target ore in the observation window (Change 3)
-    approach_bonus_scale: float = 0.2
+    # Ore discovery bonus: one-time reward when the agent first inspects
+    # a cell containing a target ore.
+    ore_discovery_bonus: float = 0.5
 
     # Spin penalty — discourages redundant turning (e.g. 3x right instead of 1x left)
     spin_penalty: float = -0.1
@@ -489,7 +489,7 @@ class Stage1RewardConfig:
     # Loiter penalty — penalises staying in a small area
     loiter_window: int = 12
     loiter_penalty: float = -0.2
-    loiter_unique_threshold: int = 8
+    loiter_unique_threshold: int = 4
 
     # Dynamic per-ore reward scaling: normalise by world target count
     # so the total available harvest reward is ~constant regardless of
@@ -510,23 +510,24 @@ VOXEL_SIZE: int = 2 * VOXEL_RADIUS + 1  # 5
 NUM_BLOCK_TYPES: int = len(BlockType)
 
 # ---------------------------------------------------------------------------
-# Sliding Window Observation
+# Fog-of-War Observation
 # ---------------------------------------------------------------------------
 
-# Horizontal extent: 9x9 footprint centered on turtle (radius=4)
-OBS_WINDOW_RADIUS_XZ: int = 4
-OBS_WINDOW_X: int = 2 * OBS_WINDOW_RADIUS_XZ + 1  # 9
-OBS_WINDOW_Z: int = 2 * OBS_WINDOW_RADIUS_XZ + 1  # 9
+# Sentinel for unexplored cells in the memory grid
+MEMORY_UNKNOWN: int = -1
 
-# Vertical extent: 32 blocks total, biased downward for mining
-OBS_WINDOW_Y: int = 32
-OBS_WINDOW_Y_ABOVE: int = 8   # blocks above turtle in window
-OBS_WINDOW_Y_BELOW: int = 23  # blocks below turtle in window
-# Invariant: OBS_WINDOW_Y_ABOVE + 1 + OBS_WINDOW_Y_BELOW == OBS_WINDOW_Y
+# Fog-of-war window: smaller than old omniscient window, populated from memory
+FOG_WINDOW_RADIUS_XZ: int = 3
+FOG_WINDOW_X: int = 2 * FOG_WINDOW_RADIUS_XZ + 1   # 7
+FOG_WINDOW_Z: int = 2 * FOG_WINDOW_RADIUS_XZ + 1   # 7
+FOG_WINDOW_Y: int = 11
+FOG_WINDOW_Y_ABOVE: int = 3    # blocks above turtle in window
+FOG_WINDOW_Y_BELOW: int = 7    # blocks below turtle in window
+# Invariant: FOG_WINDOW_Y_ABOVE + 1 + FOG_WINDOW_Y_BELOW == FOG_WINDOW_Y
 
-# Channel groups for voxel encoding
+# Channel groups: UNKNOWN + 8 ores + solid/soft/air/bedrock + explored + target = 15
 NUM_ORE_CHANNELS: int = NUM_ORE_TYPES  # 8
-NUM_VOXEL_CHANNELS: int = NUM_ORE_TYPES + 4 + 1 + 1  # ores + solid/soft/air/bedrock + explored + target = 14
+NUM_VOXEL_CHANNELS: int = 1 + NUM_ORE_TYPES + 4 + 1 + 1  # 15
 
 # Block-to-channel mapping (grouped by dynamics)
 SOLID_BLOCKS: frozenset[int] = frozenset({
@@ -539,17 +540,36 @@ SOFT_BLOCKS: frozenset[int] = frozenset({
     int(BlockType.CLAY),
 })
 
-# Channel indices
-CH_SOLID: int = NUM_ORE_TYPES       # 8
-CH_SOFT: int = NUM_ORE_TYPES + 1    # 9
-CH_AIR: int = NUM_ORE_TYPES + 2     # 10
-CH_BEDROCK: int = NUM_ORE_TYPES + 3  # 11
-CH_EXPLORED: int = NUM_ORE_TYPES + 4  # 12
-CH_TARGET: int = NUM_ORE_TYPES + 5   # 13
+# Channel indices (UNKNOWN at 0, ores at 1..8, then grouped)
+CH_UNKNOWN: int = 0
+# Ore channels: 1 through NUM_ORE_TYPES (1-8)
+CH_SOLID: int = 1 + NUM_ORE_TYPES       # 9
+CH_SOFT: int = 1 + NUM_ORE_TYPES + 1    # 10
+CH_AIR: int = 1 + NUM_ORE_TYPES + 2     # 11
+CH_BEDROCK: int = 1 + NUM_ORE_TYPES + 3  # 12
+CH_EXPLORED: int = 1 + NUM_ORE_TYPES + 4  # 13
+CH_TARGET: int = 1 + NUM_ORE_TYPES + 5   # 14
 
-# Scalar observation: pos(3) + facing(4) + fuel(1) + inv(8) + world_h(1)
-SCALAR_OBS_DIM: int = 3 + 4 + 1 + NUM_ORE_TYPES + 1  # 17
+# Immediate inspection: 3 blocks × NUM_VOXEL_CHANNELS channels each
+INSPECT_VECTOR_DIM: int = 3 * NUM_VOXEL_CHANNELS  # 45
+
+# Scalar observation:
+#   pos(3) + facing(4) + fuel(1) + inv(8) + world_h(1) + biome(5)  = 22
+#   + inspect(45) + fog_density(1) + steps_since_ore(1) + explored_frac(1) = 48
+SCALAR_OBS_DIM: int = (
+    3 + 4 + 1 + NUM_ORE_TYPES + 1 + NUM_BIOME_TYPES
+    + INSPECT_VECTOR_DIM + 3
+)  # 70
+
 MAX_WORLD_HEIGHT: int = 384
+
+# Legacy aliases for backward compatibility (deployment/inference_server.py)
+OBS_WINDOW_RADIUS_XZ: int = FOG_WINDOW_RADIUS_XZ
+OBS_WINDOW_X: int = FOG_WINDOW_X
+OBS_WINDOW_Z: int = FOG_WINDOW_Z
+OBS_WINDOW_Y: int = FOG_WINDOW_Y
+OBS_WINDOW_Y_ABOVE: int = FOG_WINDOW_Y_ABOVE
+OBS_WINDOW_Y_BELOW: int = FOG_WINDOW_Y_BELOW
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +667,34 @@ CURRICULUM_STAGES: list[CurriculumStage] = [
         advancement_threshold=0.7,
         advancement_window=300,
     ),
+    CurriculumStage(
+        name="stage_real_chunks",
+        world_size=(64, 128, 64),
+        ore_density_multiplier=1.0,  # Ignored by RealChunkWorld
+        infinite_fuel=False,
+        max_fuel=800,
+        caves_enabled=True,  # Already present in real data
+        preference_mode="dirichlet",
+        max_episode_steps=1500,
+        advancement_metric="mean_reward",
+        advancement_threshold=30.0,
+        advancement_window=200,
+        coal_fuel_value=16,
+        coal_refuel_bonus=0.1,
+    ),
+    CurriculumStage(
+        name="stage1_real_eval",
+        world_size=(64, 384, 64),       # Full MC Y-range for correct Y-mapping
+        ore_density_multiplier=1.0,     # Ignored by RealChunkWorld
+        infinite_fuel=True,
+        max_fuel=10000,
+        caves_enabled=True,             # Real data has caves
+        preference_mode="one_hot",
+        max_episode_steps=2000,         # Larger world needs more steps
+        advancement_metric="mean_reward",
+        advancement_threshold=25.0,
+        advancement_window=100,
+    ),
 ]
 
 
@@ -659,12 +707,12 @@ class PPOConfig:
     """PPO training hyperparameters."""
     learning_rate: float = 3e-4
     n_steps: int = 1024
-    batch_size: int = 512
+    batch_size: int = 2048
     n_epochs: int = 5
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.15
-    ent_coef: float = 0.15
+    ent_coef: float = 0.05
     vf_coef: float = 0.75
     max_grad_norm: float = 0.5
     normalize_advantage: bool = True

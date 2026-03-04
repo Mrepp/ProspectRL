@@ -1,0 +1,1 @@
+Add untracked files, Review the git diff, write a one sentence commit message summarizing the changes, then commit and push to origin main. Do not include a co-author line. Stage all changed and untracked files before committing. If existing files were previously not staged do not stage.

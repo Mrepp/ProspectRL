@@ -77,13 +77,13 @@ class MiningFeatureExtractor(BaseFeaturesExtractor):
 
         pref (8) ─── FiLM conditioning ──→ injected into each conv layer
                                       └──→ identity → [8]
-        voxels (14,32,9,9) → Conv3d(14→32)  → FiLM → ReLU
+        voxels (15,11,7,7) → Conv3d(15→32)  → FiLM → ReLU
                            → Conv3d(32→64)  → FiLM → ReLU
                            → Conv3d(64→128) → FiLM → ReLU
                            → SE(128, r=4)
-                           → Flatten → FC(2048→256) → ReLU → [256]
-        scalars (17)       → MLP(64→32)                    → [ 32]
-                                                      concat → [296]
+                           → Flatten → FC(→256) → ReLU       → [256]
+        scalars (70)       → MLP(128→64)                     → [ 64]
+                                                        concat → [328]
     """
 
     def __init__(
@@ -94,7 +94,7 @@ class MiningFeatureExtractor(BaseFeaturesExtractor):
         pref_dim = observation_space["pref"].shape[0]
 
         cnn_out_dim = 256
-        scalar_out_dim = 32
+        scalar_out_dim = 64
         features_dim = cnn_out_dim + scalar_out_dim + pref_dim
         super().__init__(
             observation_space, features_dim=features_dim,
@@ -140,11 +140,11 @@ class MiningFeatureExtractor(BaseFeaturesExtractor):
             nn.ReLU(),
         )
 
-        # MLP for scalar features
+        # MLP for scalar features (wider for 70-dim fog-of-war input)
         self.scalar_net = nn.Sequential(
-            nn.Linear(scalar_dim, 64),
+            nn.Linear(scalar_dim, 128),
             nn.ReLU(),
-            nn.Linear(64, scalar_out_dim),
+            nn.Linear(128, scalar_out_dim),
             nn.ReLU(),
         )
 
@@ -162,8 +162,10 @@ class MiningFeatureExtractor(BaseFeaturesExtractor):
         self, observations: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         pref = observations["pref"]
+        # Upcast float16 voxel obs to float32 for Conv3d compatibility
+        voxels = observations["voxels"].float()
         voxel_features = self.cnn_fc(
-            self._cnn_forward(observations["voxels"], pref),
+            self._cnn_forward(voxels, pref),
         )
         scalar_features = self.scalar_net(
             observations["scalars"],

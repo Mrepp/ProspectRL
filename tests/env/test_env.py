@@ -5,12 +5,15 @@ from __future__ import annotations
 import numpy as np
 from gymnasium.utils.env_checker import check_env
 from prospect_rl.config import (
+    CH_UNKNOWN,
+    FOG_WINDOW_X,
+    FOG_WINDOW_Y,
+    FOG_WINDOW_Z,
+    MEMORY_UNKNOWN,
     NUM_ACTIONS,
+    NUM_BIOME_TYPES,
     NUM_ORE_TYPES,
     NUM_VOXEL_CHANNELS,
-    OBS_WINDOW_X,
-    OBS_WINDOW_Y,
-    OBS_WINDOW_Z,
     SCALAR_OBS_DIM,
     Action,
     BlockType,
@@ -38,9 +41,9 @@ class TestObservation:
         obs, _ = env.reset(seed=42)
         assert obs["voxels"].shape == (
             NUM_VOXEL_CHANNELS,
-            OBS_WINDOW_Y,
-            OBS_WINDOW_X,
-            OBS_WINDOW_Z,
+            FOG_WINDOW_Y,
+            FOG_WINDOW_X,
+            FOG_WINDOW_Z,
         )
 
     def test_scalars_shape(self) -> None:
@@ -61,7 +64,7 @@ class TestObservation:
     def test_obs_dtypes(self) -> None:
         env = MinecraftMiningEnv(curriculum_stage=0)
         obs, _ = env.reset(seed=42)
-        assert obs["voxels"].dtype == np.float32
+        assert obs["voxels"].dtype == np.float16
         assert obs["scalars"].dtype == np.float32
         assert obs["pref"].dtype == np.float32
 
@@ -73,6 +76,17 @@ class TestObservation:
         unique_vals = np.unique(voxels)
         for v in unique_vals:
             assert v in (0.0, 1.0), f"Unexpected value {v} in voxels"
+
+    def test_scalars_include_biome_one_hot(self) -> None:
+        """Biome one-hot at indices [17:22] should be valid."""
+        env = MinecraftMiningEnv(curriculum_stage=0)
+        obs, _ = env.reset(seed=42)
+        scalars = obs["scalars"]
+        biome_oh = scalars[17:17 + NUM_BIOME_TYPES]
+        # Exactly one biome should be active
+        assert biome_oh.sum() == 1.0
+        assert np.max(biome_oh) == 1.0
+        assert all(v in (0.0, 1.0) for v in biome_oh)
 
 
 # ---------------------------------------------------------------------------
@@ -354,3 +368,127 @@ class TestStage1Integration:
         count = env._count_target_ores()
         assert count > 0  # with 10x density, should have ores
         assert env._total_target_ores_in_world == count
+
+
+# ---------------------------------------------------------------------------
+# Fog-of-War Memory System
+# ---------------------------------------------------------------------------
+
+class TestFogOfWarMemory:
+    def test_memory_init_mostly_unknown(self) -> None:
+        """After reset, most of memory should be MEMORY_UNKNOWN."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+        mem = env._memory
+        total = mem.size
+        unknown = int(np.sum(mem == MEMORY_UNKNOWN))
+        # Only a few cells inspected on reset (agent pos + 3 inspected)
+        assert unknown > total * 0.99
+
+    def test_memory_agent_position_is_air(self) -> None:
+        """Agent's position in memory should be AIR after reset."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+        px, py, pz = (
+            int(env._turtle.position[0]),
+            int(env._turtle.position[1]),
+            int(env._turtle.position[2]),
+        )
+        assert env._memory[px, py, pz] == int(BlockType.AIR)
+
+    def test_memory_accumulates_on_steps(self) -> None:
+        """Memory should reveal more cells as agent takes actions."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+        unknown_before = int(np.sum(env._memory == MEMORY_UNKNOWN))
+
+        # Take several steps (turns inspect front/above/below)
+        for _ in range(10):
+            env.step(Action.TURN_LEFT)
+
+        unknown_after = int(np.sum(env._memory == MEMORY_UNKNOWN))
+        # Should have revealed some new cells
+        assert unknown_after <= unknown_before
+
+    def test_memory_resets_on_env_reset(self) -> None:
+        """Memory should be cleared back to unknown on reset."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+
+        # Take actions to reveal cells
+        for _ in range(20):
+            env.step(Action.TURN_RIGHT)
+
+        unknown_mid = int(np.sum(env._memory == MEMORY_UNKNOWN))
+
+        # Reset should re-initialize memory
+        env.reset(seed=42)
+        unknown_after = int(np.sum(env._memory == MEMORY_UNKNOWN))
+        assert unknown_after > unknown_mid
+
+    def test_dig_through_reveals_behind_block(self) -> None:
+        """After digging, the block behind should be inspected."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        env.reset()
+
+        # Place stone in front and something behind it
+        fv = FACING_VECTORS[env._turtle.facing]
+        pos = env._turtle.position
+        front = pos + fv
+        behind = pos + 2 * fv
+        fx, fy, fz = int(front[0]), int(front[1]), int(front[2])
+        bx, by, bz = int(behind[0]), int(behind[1]), int(behind[2])
+        ws = env._world.shape
+        if (
+            0 <= bx < ws[0] and 0 <= by < ws[1] and 0 <= bz < ws[2]
+        ):
+            env._world[fx, fy, fz] = int(BlockType.STONE)
+            env._world[bx, by, bz] = int(BlockType.STONE)
+
+            # Before dig: behind block should be unknown in memory
+            # (unless it was already inspected — force unknown)
+            env._memory[bx, by, bz] = MEMORY_UNKNOWN
+
+            env.step(Action.DIG)
+
+            # After dig: behind block should now be revealed
+            assert env._memory[bx, by, bz] != MEMORY_UNKNOWN
+
+    def test_voxel_channel_0_is_unknown(self) -> None:
+        """Channel 0 (UNKNOWN) should have 1.0 for unexplored cells."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        obs, _ = env.reset()
+        voxels = obs["voxels"]
+        # Most cells in the window should be unknown after reset
+        unknown_fraction = float(voxels[CH_UNKNOWN].mean())
+        assert unknown_fraction > 0.5
+
+    def test_scalars_include_inspection_vector(self) -> None:
+        """Scalars [22:67] should contain the 3-block inspection."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        obs, _ = env.reset()
+        scalars = obs["scalars"]
+        # Inspection vector is 45 dims at indices [22:67]
+        inspect_vec = scalars[22:67]
+        # Each 15-dim block should sum to 1.0 (one-hot)
+        for i in range(3):
+            block_oh = inspect_vec[i * NUM_VOXEL_CHANNELS:(i + 1) * NUM_VOXEL_CHANNELS]
+            assert abs(block_oh.sum() - 1.0) < 1e-5, (
+                f"Block {i} one-hot sum = {block_oh.sum()}"
+            )
+
+    def test_scalars_fog_density(self) -> None:
+        """Scalar index 67 (fog density) should be high after reset."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        obs, _ = env.reset()
+        fog_density = obs["scalars"][67]
+        # Most of the window should be fog after reset
+        assert fog_density > 0.5
+
+    def test_scalars_explored_fraction(self) -> None:
+        """Scalar index 69 (explored fraction) should be near 0 after reset."""
+        env = MinecraftMiningEnv(curriculum_stage=0, seed=42)
+        obs, _ = env.reset()
+        explored_frac = obs["scalars"][69]
+        # Very few cells explored relative to world volume
+        assert explored_frac < 0.01

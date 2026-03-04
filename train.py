@@ -10,9 +10,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 from pathlib import Path
 
 from prospect_rl.config import Config
+
+
+def _configure_torch_backends() -> None:
+    """Enable GPU-friendly defaults for Ada Lovelace / Ampere+ GPUs."""
+    import torch
+
+    # TF32: 2x matmul/conv throughput on Ampere+ tensor cores, negligible
+    # precision loss for RL training.
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    # cuDNN benchmark: safe because voxel observation shape is fixed.
+    torch.backends.cudnn.benchmark = True
 
 
 def main() -> None:
@@ -23,7 +36,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--n-envs", type=int, default=None,
-        help="Number of parallel environments (default: from config)",
+        help="Number of parallel environments (default: auto-scale by CPU cores)",
     )
     parser.add_argument(
         "--total-timesteps", type=int, default=None,
@@ -45,10 +58,44 @@ def main() -> None:
         "--tb-log", type=str, default=None,
         help="TensorBoard log directory (default: from config)",
     )
+    parser.add_argument(
+        "--cache-dir", type=str, default=None,
+        help="Path to chunk cache dir (enables real chunk training)",
+    )
+    parser.add_argument(
+        "--real-fraction", type=float, default=0.0,
+        help="Fraction of envs using real chunks in mixed mode (0.0-1.0)",
+    )
+    parser.add_argument(
+        "--real-cache-dir", type=str, default=None,
+        help="Cache dir for real chunk envs in mixed mode",
+    )
+    parser.add_argument(
+        "--real-stage", type=int, default=None,
+        help="Curriculum stage for real chunk envs (default: same as --stage)",
+    )
+    parser.add_argument(
+        "--device", type=str, default="auto",
+        help="PyTorch device: auto, cuda, cpu (default: auto)",
+    )
+    parser.add_argument(
+        "--dummy-vec-env", action="store_true",
+        help="Use DummyVecEnv instead of SubprocVecEnv (for debugging)",
+    )
     args = parser.parse_args()
 
+    _configure_torch_backends()
+
     config = Config()
-    n_envs = args.n_envs or config.training.n_envs
+
+    # Auto-scale n_envs by CPU cores: 2 envs per core, rounded to multiple of
+    # NUM_ORE_TYPES (8) so every ore type gets equal representation.
+    if args.n_envs is not None:
+        n_envs = args.n_envs
+    else:
+        cpu_count = multiprocessing.cpu_count()
+        n_envs = max(8, min(48, (cpu_count * 2 // 8) * 8))
+
     total_timesteps = args.total_timesteps or config.training.total_timesteps
     seed = args.seed if args.seed is not None else config.training.seed
     tb_log = args.tb_log or config.training.tensorboard_log
@@ -67,11 +114,25 @@ def main() -> None:
     from stable_baselines3.common.callbacks import CallbackList
     from stable_baselines3.common.vec_env import VecNormalize
 
+    # Determine world class
+    world_class = None
+    if args.cache_dir:
+        from prospect_rl.env.world.real_chunk_world import RealChunkWorld
+        world_class = RealChunkWorld
+
+    use_subproc = not args.dummy_vec_env
+
     # Create environment
     env = make_training_env(
         n_envs=n_envs,
         stage_index=args.stage,
         seed=seed,
+        world_class=world_class,
+        cache_dir=args.cache_dir,
+        real_fraction=args.real_fraction,
+        real_cache_dir=args.real_cache_dir,
+        real_stage_index=args.real_stage,
+        use_subproc=use_subproc,
     )
 
     # Resume or create new model
@@ -92,16 +153,19 @@ def main() -> None:
             model = MaskablePPO.load(
                 manifest["model_path"],
                 env=env,
+                device=args.device,
             )
             reset_num_timesteps = False
         else:
             print("No checkpoint found, starting fresh")
             model = create_ppo_model(
                 env, config, tensorboard_log=tb_log, seed=seed,
+                device=args.device,
             )
     else:
         model = create_ppo_model(
             env, config, tensorboard_log=tb_log, seed=seed,
+            device=args.device,
         )
 
     # Callbacks
@@ -117,8 +181,9 @@ def main() -> None:
     ])
 
     # Train
-    print(f"Training: stage={args.stage}, envs={n_envs}, "
-          f"timesteps={total_timesteps}, seed={seed}")
+    vec_type = "SubprocVecEnv" if use_subproc else "DummyVecEnv"
+    print(f"Training: stage={args.stage}, envs={n_envs} ({vec_type}), "
+          f"device={args.device}, timesteps={total_timesteps}, seed={seed}")
     model.learn(
         total_timesteps=total_timesteps,
         callback=callbacks,

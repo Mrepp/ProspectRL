@@ -1,34 +1,29 @@
-"""3D visualization of the generated mining world using PyVista.
+"""Real Minecraft chunk viewer using PyVista.
 
-Renders ores, caves, and bedrock as colored voxels.  Filler blocks
-(dirt, gravel, etc.) are hidden by default but can be shown with
-``--fillers``.  Uses curriculum stages from config.py so visualized
-worlds match training environments exactly.
+Loads cached ``.npz`` chunks (produced by ``prospect_rl.tools.cache_chunks``)
+and renders ores, bedrock, biome overlay, and ore counts.  Press **N** / **P**
+to cycle through chunks.
 
 Usage::
 
-    python -m prospect_rl.viz_world                    # stage 1 (default)
-    python -m prospect_rl.viz_world --stage 2          # stage 2
-    python -m prospect_rl.viz_world --stage all        # compare all stages
-    python -m prospect_rl.viz_world --seed 123 --stage 3
-    python -m prospect_rl.viz_world --stage 1 --biomes --fillers
+    python viz_world.py                          # random chunk, seed 42
+    python viz_world.py --seed 99                # different starting chunk
+    python viz_world.py --fillers                # show dirt/gravel/etc.
+    python viz_world.py --cache-dir path/to/dir  # custom cache directory
 """
 
 from __future__ import annotations
 
 import argparse
+import glob as globmod
+import os
 
 import numpy as np
 import pyvista as pv
-from prospect_rl.config import (
-    CURRICULUM_STAGES,
-    BiomeType,
-    BlockType,
-    CurriculumStage,
-)
-from prospect_rl.env.world.world import World
+from prospect_rl.config import BiomeType, BlockType
 
-# Minecraft-accurate block colours
+# ── Block / biome appearance ─────────────────────────────────────────
+
 BLOCK_COLORS: dict[int, str] = {
     BlockType.COAL_ORE: "#3d3d3d",
     BlockType.IRON_ORE: "#d4a373",
@@ -39,7 +34,6 @@ BLOCK_COLORS: dict[int, str] = {
     BlockType.LAPIS_ORE: "#345ec3",
     BlockType.COPPER_ORE: "#e07c4a",
     BlockType.BEDROCK: "#555555",
-    BlockType.AIR: "#87ceeb",
     BlockType.DIRT: "#8b6914",
     BlockType.GRAVEL: "#8a8a8a",
     BlockType.GRANITE: "#9a6b4c",
@@ -51,6 +45,8 @@ BLOCK_COLORS: dict[int, str] = {
 }
 
 BLOCK_NAMES: dict[int, str] = {
+    BlockType.AIR: "Air/Cave",
+    BlockType.STONE: "Stone",
     BlockType.COAL_ORE: "Coal",
     BlockType.IRON_ORE: "Iron",
     BlockType.GOLD_ORE: "Gold",
@@ -60,7 +56,6 @@ BLOCK_NAMES: dict[int, str] = {
     BlockType.LAPIS_ORE: "Lapis",
     BlockType.COPPER_ORE: "Copper",
     BlockType.BEDROCK: "Bedrock",
-    BlockType.AIR: "Air/Cave",
     BlockType.DIRT: "Dirt",
     BlockType.GRAVEL: "Gravel",
     BlockType.GRANITE: "Granite",
@@ -87,7 +82,7 @@ BIOME_NAMES: dict[int, str] = {
     BiomeType.LUSH_CAVES: "Lush Caves",
 }
 
-# Ore render order (rarest on top for visibility)
+# Render rarest first so they appear on top
 ORE_ORDER = [
     BlockType.DIAMOND_ORE,
     BlockType.EMERALD_ORE,
@@ -110,6 +105,16 @@ FILLER_ORDER = [
     BlockType.DEEPSLATE,
 ]
 
+# Actor names that get removed on chunk cycling
+_ORE_ACTORS = [f"ore_{bt}" for bt in ORE_ORDER]
+_FILLER_ACTORS = [f"filler_{bt}" for bt in FILLER_ORDER]
+_BIOME_ACTORS = [f"biome_{bt}" for bt in BiomeType]
+_TEXT_ACTORS = ["title", "info", "ore_counts", "bedrock"]
+_ALL_ACTORS = _ORE_ACTORS + _FILLER_ACTORS + _BIOME_ACTORS + _TEXT_ACTORS
+
+
+# ── Helpers ───────────────────────────────────────────────────────────
+
 
 def _voxels_for_block(
     blocks: np.ndarray, block_id: int,
@@ -118,154 +123,197 @@ def _voxels_for_block(
     xs, ys, zs = np.where(blocks == block_id)
     if len(xs) == 0:
         return None
-
     centers = np.column_stack([xs, ys, zs]).astype(float)
     cloud = pv.PolyData(centers)
     return cloud.glyph(
-        geom=pv.Cube(
-            x_length=0.9, y_length=0.9, z_length=0.9,
-        ),
+        geom=pv.Cube(x_length=0.9, y_length=0.9, z_length=0.9),
     )
 
 
-def _print_stats(
-    blocks: np.ndarray, world: World, label: str,
-) -> None:
-    """Print block distribution statistics to console."""
+def _discover_chunks(
+    cache_dir: str, min_solid_frac: float = 0.05,
+) -> list[str]:
+    """Return paths of non-empty ``.npz`` chunks in *cache_dir*.
+
+    Filters out chunks that are almost entirely air (ocean/sky
+    regions that slipped through the extractor).
+    """
+    all_files = sorted(
+        globmod.glob(os.path.join(cache_dir, "*.npz")),
+    )
+    if not all_files:
+        raise FileNotFoundError(
+            f"No .npz cache files found in {cache_dir!r}.  "
+            "Run `python -m prospect_rl.tools.cache_chunks` first."
+        )
+
+    kept: list[str] = []
+    skipped = 0
+    for f in all_files:
+        data = np.load(f, allow_pickle=False)
+        blocks = data["blocks"]
+        solid = int(np.sum(blocks != 0))  # 0 == AIR
+        if solid / blocks.size >= min_solid_frac:
+            kept.append(f)
+        else:
+            skipped += 1
+
+    if skipped:
+        print(
+            f"Filtered {skipped} empty chunks "
+            f"({len(kept)} usable of {len(all_files)} total)"
+        )
+    if not kept:
+        raise FileNotFoundError(
+            f"All {len(all_files)} chunks in {cache_dir!r} are empty."
+        )
+    return kept
+
+
+def _content_y_range(blocks: np.ndarray, pad: int = 2):
+    """Find the Y-range that contains non-air blocks.
+
+    Returns ``(y_lo, y_hi)`` with a small *pad* margin.
+    """
+    sy = blocks.shape[1]
+    for y_lo in range(sy):
+        if np.any(blocks[:, y_lo, :] != 0):
+            break
+    else:
+        y_lo = 0
+
+    for y_hi in range(sy - 1, -1, -1):
+        if np.any(blocks[:, y_hi, :] != 0):
+            break
+    else:
+        y_hi = sy - 1
+
+    y_lo = max(0, y_lo - pad)
+    y_hi = min(sy - 1, y_hi + pad)
+    return y_lo, y_hi
+
+
+def _load_chunk(path: str) -> dict:
+    """Load a cached chunk, crop Y to content range."""
+    data = np.load(path, allow_pickle=False)
+    blocks = data["blocks"]
+    metadata = data["metadata"]
+
+    y_lo, y_hi = _content_y_range(blocks)
+    cropped = blocks[:, y_lo:y_hi + 1, :]
+
+    return {
+        "blocks": cropped,
+        "biome_map": data["biome_map"],
+        "metadata": metadata,
+        "filename": os.path.basename(path),
+        "y_lo": y_lo,
+        "y_hi": y_hi,
+        "full_y": int(blocks.shape[1]),
+    }
+
+
+def _ore_count_text(blocks: np.ndarray) -> str:
+    """Build a multi-line string with per-ore counts."""
+    lines: list[str] = []
+    total = 0
+    for bt in ORE_ORDER:
+        count = int(np.sum(blocks == bt))
+        if count > 0:
+            lines.append(f"  {BLOCK_NAMES[bt]:<10} {count:>6,}")
+            total += count
+    if not lines:
+        return "No ores in this chunk"
+    lines.append(f"  {'Total':<10} {total:>6,}")
+    return "\n".join(lines)
+
+
+def _biome_summary(biome_map: np.ndarray) -> str:
+    """One-line biome summary for overlays."""
+    total = biome_map.size
+    parts: list[str] = []
+    for biome_id in BiomeType:
+        count = int(np.sum(biome_map == biome_id))
+        if count == 0:
+            continue
+        pct = count / total * 100
+        name = BIOME_NAMES.get(biome_id, str(biome_id))
+        if pct >= 1:
+            parts.append(f"{name} {pct:.0f}%")
+        else:
+            parts.append(f"{name} <1%")
+    return ", ".join(parts) if parts else "Unknown"
+
+
+def _print_chunk_stats(chunk_data: dict) -> None:
+    """Print block distribution to console."""
+    blocks = chunk_data["blocks"]
+    biome_map = chunk_data["biome_map"]
+    metadata = chunk_data["metadata"]
+    label = chunk_data["filename"]
     sx, sy, sz = blocks.shape
-    print(f"\n{'=' * 60}")
-    print(f"  {label}: {sx}x{sy}x{sz}")
-    print(f"{'=' * 60}")
-    total_blocks = blocks.size
+    mc_y_min = int(metadata[3])
+    mc_y_max = int(metadata[4])
+    y_lo = chunk_data.get("y_lo", 0)
+    y_hi = chunk_data.get("y_hi", sy - 1)
+    full_y = chunk_data.get("full_y", sy)
 
-    header = (
-        f"{'Block Type':<16} {'Count':>8} "
-        f"{'% of World':>10}"
+    print(f"\n{'=' * 60}")
+    print(
+        f"  {label}:  {sx}x{full_y}x{sz}"
+        f"  (Y {y_lo}-{y_hi}, MC Y: {mc_y_min} to {mc_y_max})"
     )
-    print(f"\n{header}")
+    print(f"{'=' * 60}")
+
+    total = blocks.size
+    print(f"\n{'Block Type':<16} {'Count':>8} {'% of World':>10}")
     print("-" * 38)
 
-    # Ores
     for bt in ORE_ORDER:
         count = int(np.sum(blocks == bt))
         if count == 0:
             continue
-        pct = count / total_blocks * 100
-        name = BLOCK_NAMES.get(bt, str(bt))
-        print(f"{name:<16} {count:>8,} {pct:>9.3f}%")
+        pct = count / total * 100
+        print(f"{BLOCK_NAMES[bt]:<16} {count:>8,} {pct:>9.3f}%")
 
-    # Fillers
     for bt in FILLER_ORDER:
         count = int(np.sum(blocks == bt))
         if count == 0:
             continue
-        pct = count / total_blocks * 100
-        name = BLOCK_NAMES.get(bt, str(bt))
-        print(f"{name:<16} {count:>8,} {pct:>9.3f}%")
+        pct = count / total * 100
+        print(f"{BLOCK_NAMES[bt]:<16} {count:>8,} {pct:>9.3f}%")
 
-    # Stone, Air, Bedrock
     for bt in [BlockType.STONE, BlockType.AIR, BlockType.BEDROCK]:
         count = int(np.sum(blocks == bt))
-        pct = count / total_blocks * 100
+        pct = count / total * 100
         name = BLOCK_NAMES.get(bt, str(bt))
         print(f"{name:<16} {count:>8,} {pct:>9.3f}%")
 
     # Biome distribution
-    bm = world.biome_map
-    print(f"\n{'Biome Distribution':}")
+    print("\nBiome Distribution:")
     print("-" * 38)
-    total_cols = bm.size
+    total_cols = biome_map.size
     for biome_id in BiomeType:
-        count = int(np.sum(bm == biome_id))
+        count = int(np.sum(biome_map == biome_id))
         if count == 0:
             continue
         pct = count / total_cols * 100
         name = BIOME_NAMES.get(biome_id, str(biome_id))
         print(f"  {name:<16} {count:>6} cols {pct:>6.1f}%")
 
-    # Y-level ore density profile
-    print(f"\n{'Y-Level Ore Density Profile':}")
-    print("-" * 40)
-    for y in range(0, sy, max(1, sy // 16)):
-        y_slice = blocks[:, y, :]
-        ore_mask = np.zeros_like(y_slice, dtype=bool)
-        for bt in ORE_ORDER:
-            ore_mask |= y_slice == bt
-        ore_count = int(np.sum(ore_mask))
-        total_in_slice = y_slice.size
-        bar_len = int(
-            ore_count / max(total_in_slice, 1) * 200,
-        )
-        bar = "#" * bar_len
-        print(f"  y={y:>3}: {ore_count:>5} ores  {bar}")
     print()
 
 
-def _add_world_to_plotter(
-    pl: pv.Plotter,
-    blocks: np.ndarray,
-    show_fillers: bool = False,
-) -> None:
-    """Add block meshes to a plotter instance."""
-    # Render ores (fully opaque)
-    for bt in ORE_ORDER:
-        mesh = _voxels_for_block(blocks, bt)
-        if mesh is not None:
-            name = BLOCK_NAMES[bt]
-            color = BLOCK_COLORS[bt]
-            count = int(np.sum(blocks == bt))
-            pl.add_mesh(
-                mesh, color=color,
-                label=f"{name} ({count:,})",
-                opacity=1.0,
-            )
-
-    # Render filler blocks (lower opacity)
-    if show_fillers:
-        for bt in FILLER_ORDER:
-            mesh = _voxels_for_block(blocks, bt)
-            if mesh is not None:
-                name = BLOCK_NAMES[bt]
-                color = BLOCK_COLORS[bt]
-                count = int(np.sum(blocks == bt))
-                pl.add_mesh(
-                    mesh, color=color,
-                    label=f"{name} ({count:,})",
-                    opacity=0.35,
-                )
-
-    # Render caves
-    air_mesh = _voxels_for_block(blocks, BlockType.AIR)
-    if air_mesh is not None:
-        air_count = int(np.sum(blocks == BlockType.AIR))
-        pl.add_mesh(
-            air_mesh,
-            color=BLOCK_COLORS[BlockType.AIR],
-            label=f"Caves ({air_count:,})",
-            opacity=0.15,
-        )
-
-    # Render bedrock floor
-    bed_mesh = _voxels_for_block(blocks, BlockType.BEDROCK)
-    if bed_mesh is not None:
-        pl.add_mesh(
-            bed_mesh,
-            color=BLOCK_COLORS[BlockType.BEDROCK],
-            label="Bedrock",
-            opacity=0.3,
-        )
+# ── Rendering ─────────────────────────────────────────────────────────
 
 
 def _add_biome_overlay(
     pl: pv.Plotter,
-    world: World,
+    biome_map: np.ndarray,
 ) -> None:
-    """Add a colored ground-plane showing biome boundaries."""
-    bm = world.biome_map
-    sx, sz = bm.shape
-
+    """Add a coloured ground-plane showing biome boundaries."""
     for biome_id in BiomeType:
-        xs, zs = np.where(bm == biome_id)
+        xs, zs = np.where(biome_map == biome_id)
         if len(xs) == 0:
             continue
         centers = np.column_stack([
@@ -275,9 +323,7 @@ def _add_biome_overlay(
         ])
         cloud = pv.PolyData(centers)
         mesh = cloud.glyph(
-            geom=pv.Cube(
-                x_length=1.0, y_length=0.1, z_length=1.0,
-            ),
+            geom=pv.Cube(x_length=1.0, y_length=0.1, z_length=1.0),
         )
         name = BIOME_NAMES.get(biome_id, str(biome_id))
         pl.add_mesh(
@@ -285,213 +331,212 @@ def _add_biome_overlay(
             color=BIOME_COLORS[biome_id],
             label=f"Biome: {name}",
             opacity=0.6,
+            name=f"biome_{biome_id}",
         )
 
 
-def _stage_label(stage: CurriculumStage) -> str:
-    """Build a human-readable label showing stage name and dimensions."""
-    sx, sy, sz = stage.world_size
-    return (
-        f"Stage {CURRICULUM_STAGES.index(stage) + 1}: "
-        f"{stage.name}  ({sx}x{sy}x{sz})"
-    )
-
-
-def _world_from_stage(
-    stage: CurriculumStage, seed: int,
-) -> World:
-    """Create a World matching the curriculum stage parameters."""
-    return World(
-        size=stage.world_size,
-        seed=seed,
-        ore_density_multiplier=stage.ore_density_multiplier,
-        caves_enabled=stage.caves_enabled,
-    )
-
-
-def visualize(
-    seed: int = 42,
-    stage_idx: int = 0,
-    show_all: bool = False,
-    show_biomes: bool = False,
-    show_fillers: bool = False,
+def _render_chunk(
+    pl: pv.Plotter,
+    chunk_data: dict,
+    chunk_index: int,
+    total_chunks: int,
+    show_fillers: bool,
 ) -> None:
-    """Generate world(s) and open a 3D PyVista viewer."""
-    if show_all:
-        _visualize_all(seed, show_biomes, show_fillers)
-        return
+    """Clear previous actors and render a new chunk."""
+    blocks = chunk_data["blocks"]
+    biome_map = chunk_data["biome_map"]
+    metadata = chunk_data["metadata"]
+    filename = chunk_data["filename"]
+    sx, sy, sz = blocks.shape
 
-    stage = CURRICULUM_STAGES[stage_idx]
-    size = stage.world_size
-    label = _stage_label(stage)
+    # Remove previous chunk actors
+    for actor_name in _ALL_ACTORS:
+        try:
+            pl.remove_actor(actor_name)
+        except Exception:
+            pass
 
-    print(f"Generating {label} (seed={seed})...")
-    world = _world_from_stage(stage, seed)
-    blocks = world._blocks
-    _print_stats(blocks, world, label)
+    # Ores
+    for bt in ORE_ORDER:
+        mesh = _voxels_for_block(blocks, bt)
+        if mesh is not None:
+            count = int(np.sum(blocks == bt))
+            pl.add_mesh(
+                mesh,
+                color=BLOCK_COLORS[bt],
+                label=f"{BLOCK_NAMES[bt]} ({count:,})",
+                opacity=1.0,
+                name=f"ore_{bt}",
+            )
 
-    print("Building 3D meshes...")
-    pl = pv.Plotter(title=f"ProspectRL — {label}")
-    pl.set_background("#1a1a2e")
+    # Fillers
+    if show_fillers:
+        for bt in FILLER_ORDER:
+            mesh = _voxels_for_block(blocks, bt)
+            if mesh is not None:
+                count = int(np.sum(blocks == bt))
+                pl.add_mesh(
+                    mesh,
+                    color=BLOCK_COLORS[bt],
+                    label=f"{BLOCK_NAMES[bt]} ({count:,})",
+                    opacity=0.35,
+                    name=f"filler_{bt}",
+                )
 
-    _add_world_to_plotter(
-        pl, blocks, show_fillers=show_fillers,
-    )
+    # Bedrock
+    bed_mesh = _voxels_for_block(blocks, BlockType.BEDROCK)
+    if bed_mesh is not None:
+        pl.add_mesh(
+            bed_mesh,
+            color=BLOCK_COLORS[BlockType.BEDROCK],
+            label="Bedrock",
+            opacity=0.3,
+            name="bedrock",
+        )
 
-    if show_biomes:
-        _add_biome_overlay(pl, world)
+    # Biome overlay
+    _add_biome_overlay(pl, biome_map)
 
-    pl.add_legend(bcolor=(0.1, 0.1, 0.2, 0.8), face=None)
-    pl.add_axes(
-        xlabel="X", ylabel="Y (height)", zlabel="Z",
-    )
+    # Text overlays
+    mc_y_min = int(metadata[3])
+    mc_y_max = int(metadata[4])
+    y_lo = chunk_data.get("y_lo", 0)
+    y_hi = chunk_data.get("y_hi", sy - 1)
+    full_y = chunk_data.get("full_y", sy)
+    biome_text = _biome_summary(biome_map)
 
-    # Dimension overlay in upper-right corner
-    sx, sy, sz = size
-    dim_text = (
-        f"World: {sx}x{sy}x{sz}\n"
-        f"Ore density: {stage.ore_density_multiplier}x\n"
-        f"Caves: {'ON' if stage.caves_enabled else 'OFF'}\n"
-        f"Fuel: {'infinite' if stage.infinite_fuel else stage.max_fuel}\n"
-        f"Seed: {seed}"
+    info_text = (
+        f"Chunk: {filename}"
+        f"  ({chunk_index + 1}/{total_chunks})\n"
+        f"Size: {sx}x{full_y}x{sz}"
+        f"  (showing Y {y_lo}-{y_hi})\n"
+        f"MC Y: {mc_y_min} to {mc_y_max}\n"
+        f"Biome: {biome_text}\n"
+        f"Press N / P to cycle"
     )
     pl.add_text(
-        dim_text, position="upper_right",
+        info_text, position="upper_right",
         font_size=10, color="white",
-    )
-    pl.add_text(
-        label, position="upper_left",
-        font_size=12, color="white",
+        name="info",
     )
 
-    center = np.array([
-        size[0] / 2, size[1] / 2, size[2] / 2,
-    ])
-    max_dim = max(size)
+    pl.add_text(
+        f"Real Chunk Viewer — {filename}",
+        position="upper_left",
+        font_size=12, color="white",
+        name="title",
+    )
+
+    ore_text = "Ore Counts:\n" + _ore_count_text(blocks)
+    pl.add_text(
+        ore_text, position="lower_right",
+        font_size=10, color="#cccccc",
+        name="ore_counts",
+    )
+
+    # Camera — center on cropped content
+    center = np.array([sx / 2, sy / 2, sz / 2])
+    max_dim = max(sx, sy, sz)
     pl.camera.focal_point = center
     pl.camera.position = center + np.array([
         max_dim * 1.5, max_dim * 1.2, max_dim * 1.5,
     ])
 
-    print("Opening viewer... (close window to exit)")
-    pl.show()
+    pl.render()
 
 
-def _visualize_all(
-    seed: int,
-    show_biomes: bool,
+# ── Main viewer ───────────────────────────────────────────────────────
+
+
+def visualize_chunks(
+    seed: int = 42,
+    cache_dir: str = "data/chunk_cache/combined",
     show_fillers: bool = False,
 ) -> None:
-    """Render all curriculum stages side by side."""
-    n_stages = len(CURRICULUM_STAGES)
+    """Load and display cached chunks with N/P key cycling."""
+    chunk_files = _discover_chunks(cache_dir)
+    total = len(chunk_files)
+    rng = np.random.default_rng(seed)
 
-    worlds: list[World] = []
-    for stage in CURRICULUM_STAGES:
-        label = _stage_label(stage)
-        print(f"Generating {label} (seed={seed})...")
-        w = _world_from_stage(stage, seed)
-        worlds.append(w)
-        _print_stats(w._blocks, w, label)
+    # Shuffle order so N cycles through random chunks
+    indices = list(range(total))
+    rng.shuffle(indices)
 
-    print("Building 3D meshes for all stages...")
-    pl = pv.Plotter(
-        shape=(1, n_stages),
-        title="ProspectRL — Curriculum Stage Comparison",
-    )
+    state = {"idx": 0}
+
+    # Load first chunk
+    first = _load_chunk(chunk_files[indices[0]])
+    _print_chunk_stats(first)
+
+    print(f"Found {total} cached chunks.  Building 3D view...")
+    pl = pv.Plotter(title="ProspectRL — Real Chunk Viewer")
     pl.set_background("#1a1a2e")
 
-    for col, stage in enumerate(CURRICULUM_STAGES):
-        pl.subplot(0, col)
-        w = worlds[col]
-        size = stage.world_size
-        label = _stage_label(stage)
+    _render_chunk(pl, first, 0, total, show_fillers)
 
-        _add_world_to_plotter(
-            pl, w._blocks, show_fillers=show_fillers,
+    pl.add_legend(bcolor=(0.1, 0.1, 0.2, 0.8), face=None)
+    pl.add_axes(xlabel="X", ylabel="Y (height)", zlabel="Z")
+
+    controls = (
+        "Controls:\n"
+        "  N  next chunk\n"
+        "  P  previous chunk\n"
+        "  Mouse drag to rotate"
+    )
+    pl.add_text(
+        controls, position="lower_left",
+        font_size=8, color="#888888",
+        name="controls",
+    )
+
+    def _cycle(delta: int) -> None:
+        state["idx"] = (state["idx"] + delta) % total
+        idx = indices[state["idx"]]
+        chunk_data = _load_chunk(chunk_files[idx])
+        _print_chunk_stats(chunk_data)
+        # Remove stale legend before re-render
+        try:
+            pl.remove_legend()
+        except Exception:
+            pass
+        _render_chunk(
+            pl, chunk_data, state["idx"], total, show_fillers,
         )
+        pl.add_legend(bcolor=(0.1, 0.1, 0.2, 0.8), face=None)
 
-        if show_biomes:
-            _add_biome_overlay(pl, w)
+    pl.add_key_event("n", lambda: _cycle(1))
+    pl.add_key_event("p", lambda: _cycle(-1))
 
-        pl.add_legend(
-            bcolor=(0.1, 0.1, 0.2, 0.8), face=None,
-        )
-        pl.add_axes(
-            xlabel="X", ylabel="Y", zlabel="Z",
-        )
-
-        sx, sy, sz = size
-        info = (
-            f"{label}\n"
-            f"ore: {stage.ore_density_multiplier}x  "
-            f"caves: {'ON' if stage.caves_enabled else 'OFF'}"
-        )
-        pl.add_text(
-            info, position="upper_left",
-            font_size=9, color="white",
-        )
-
-        center = np.array([
-            size[0] / 2, size[1] / 2, size[2] / 2,
-        ])
-        max_dim = max(size)
-        pl.camera.focal_point = center
-        pl.camera.position = center + np.array([
-            max_dim * 1.5,
-            max_dim * 1.2,
-            max_dim * 1.5,
-        ])
-
-    print("Opening viewer... (close window to exit)")
+    print("Opening chunk viewer...  (close window to exit)")
     pl.show()
+
+
+# ── CLI ───────────────────────────────────────────────────────────────
 
 
 def main() -> None:
-    # Build stage choices: "1" through "N" plus "all"
-    n = len(CURRICULUM_STAGES)
-    stage_choices = [str(i + 1) for i in range(n)] + ["all"]
-    stage_help_lines = [
-        f"  {i + 1}: {s.name} "
-        f"({s.world_size[0]}x{s.world_size[1]}x{s.world_size[2]})"
-        for i, s in enumerate(CURRICULUM_STAGES)
-    ]
-
     parser = argparse.ArgumentParser(
-        description="Visualize mining world (matches curriculum stages)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Curriculum stages:\n" + "\n".join(stage_help_lines),
+        description="Browse real cached Minecraft chunks in 3D",
     )
     parser.add_argument(
         "--seed", type=int, default=42,
-        help="World seed (default: 42)",
+        help="Seed for chunk shuffle order (default: 42)",
     )
     parser.add_argument(
-        "--stage",
-        choices=stage_choices,
-        default="1",
-        help=(
-            f"Curriculum stage 1-{n}, or 'all' to compare "
-            f"(default: 1)"
-        ),
-    )
-    parser.add_argument(
-        "--biomes", action="store_true",
-        help="Show biome overlay on ground plane",
+        "--cache-dir", type=str,
+        default="data/chunk_cache/combined",
+        help="Directory with .npz chunk files "
+        "(default: data/chunk_cache/combined)",
     )
     parser.add_argument(
         "--fillers", action="store_true",
-        help="Show filler blocks (dirt, gravel, etc.)",
+        help="Show filler blocks (dirt, gravel, deepslate, etc.)",
     )
     args = parser.parse_args()
 
-    show_all = args.stage == "all"
-    stage_idx = 0 if show_all else int(args.stage) - 1
-
-    visualize(
+    visualize_chunks(
         seed=args.seed,
-        stage_idx=stage_idx,
-        show_all=show_all,
-        show_biomes=args.biomes,
+        cache_dir=args.cache_dir,
         show_fillers=args.fillers,
     )
 

@@ -128,6 +128,10 @@ class MetricsCallback(BaseCallback):
                 step_count = info.get("step", 1)
                 fuel_eff = ore_count / max(step_count, 1)
 
+                # Per-world-type metric prefix
+                world_type = info.get("world_type", "sim")
+                wt_prefix = f"mining_{world_type}"
+
                 self.logger.record(
                     "mining/ores_per_episode", ore_count,
                 )
@@ -167,6 +171,17 @@ class MetricsCallback(BaseCallback):
                 self.logger.record(
                     "mining/local_clears",
                     self._episode_clears.pop(i, 0),
+                )
+
+                # World-type split metrics
+                self.logger.record(
+                    f"{wt_prefix}/ores_per_episode", ore_count,
+                )
+                self.logger.record(
+                    f"{wt_prefix}/episode_steps", step_count,
+                )
+                self.logger.record(
+                    f"{wt_prefix}/fuel_efficiency", fuel_eff,
                 )
 
                 # Stage 1 specific metrics

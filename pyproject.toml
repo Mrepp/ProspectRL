@@ -40,8 +40,11 @@ colab = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
 ]
+worldimport = [
+    "amulet-core>=1.9.0",
+]
 all = [
-    "prospect-rl[deploy,viz,dev]",
+    "prospect-rl[deploy,viz,dev,worldimport]",
 ]
 
 [project.scripts]
@@ -57,6 +60,7 @@ prospect-viz-episode = "prospect_rl.viz_episode:main"
 "prospect_rl.models" = "models"
 "prospect_rl.deployment" = "deployment"
 "prospect_rl.multiagent" = "multiagent"
+"prospect_rl.tools" = "prospect_rl/tools"
 
 [tool.setuptools]
 packages = [
@@ -66,6 +70,7 @@ packages = [
     "prospect_rl.models",
     "prospect_rl.deployment",
     "prospect_rl.multiagent",
+    "prospect_rl.tools",
 ]
 
 [tool.ruff]

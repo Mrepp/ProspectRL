@@ -199,8 +199,6 @@ def compute_stage1_reward_components(
     ore_y_range: tuple[float, float] = (0.0, 39.0),
     world_height: int = 40,
     world_size: tuple[int, int, int] = (40, 40, 40),
-    prev_nearest_target_dist: float = float("inf"),
-    curr_nearest_target_dist: float = float("inf"),
     total_target_ores_in_world: int = 100,
     stage1_config: Stage1RewardConfig | None = None,
     is_new_xz_position: bool = False,
@@ -220,7 +218,7 @@ def compute_stage1_reward_components(
     r_adjacent:
         Y-distance penalty (negative when outside ore range).
     r_clear:
-        Exploration bonus + approach shaping bonus.
+        Exploration bonus + vertical progress shaping.
     r_ops:
         Waste penalty (negative for non-target digs).
     new_waste_count:
@@ -309,17 +307,6 @@ def compute_stage1_reward_components(
             r_clear += cfg.xz_exploration_bonus / (
                 1.0 + explored_xz_count / xz_halflife
             )
-
-    # Approach shaping bonus: reward for moving closer to nearest
-    # visible target ore in the observation window.
-    if (
-        prev_nearest_target_dist < float("inf")
-        or curr_nearest_target_dist < float("inf")
-    ):
-        # Only apply when at least one measurement is finite
-        p = min(prev_nearest_target_dist, 50.0)
-        c = min(curr_nearest_target_dist, 50.0)
-        r_clear += cfg.approach_bonus_scale * (p - c)
 
     return r_harvest, r_adjacent, r_clear, r_ops, new_waste_count
 

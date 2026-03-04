@@ -4,7 +4,7 @@ Features:
 - Dict observation space: ``voxels`` (3D one-hot tensor), ``scalars``
   (global features), and ``pref`` (ore preference)
 - Discrete(8) action space with action masking for MaskablePPO
-- Sliding 3D observation window (fixed size, independent of world size)
+- Fog-of-war memory: agent inspects 3 blocks/step and builds a map
 - Stub world for development without Phase 1 world simulation
 """
 
@@ -23,17 +23,21 @@ from prospect_rl.config import (
     CH_SOFT,
     CH_SOLID,
     CH_TARGET,
+    CH_UNKNOWN,
     CURRICULUM_STAGES,
+    FOG_WINDOW_RADIUS_XZ,
+    FOG_WINDOW_X,
+    FOG_WINDOW_Y,
+    FOG_WINDOW_Y_ABOVE,
+    FOG_WINDOW_Y_BELOW,
+    FOG_WINDOW_Z,
+    INSPECT_VECTOR_DIM,
     MAX_WORLD_HEIGHT,
+    MEMORY_UNKNOWN,
     NUM_ACTIONS,
+    NUM_BIOME_TYPES,
     NUM_ORE_TYPES,
     NUM_VOXEL_CHANNELS,
-    OBS_WINDOW_RADIUS_XZ,
-    OBS_WINDOW_X,
-    OBS_WINDOW_Y,
-    OBS_WINDOW_Y_ABOVE,
-    OBS_WINDOW_Y_BELOW,
-    OBS_WINDOW_Z,
     ORE_TYPES,
     SCALAR_OBS_DIM,
     SOFT_BLOCKS,
@@ -52,7 +56,7 @@ from prospect_rl.env.reward_vector import (
     compute_stage1_reward_components,
     compute_stage1_terminal_bonus,
 )
-from prospect_rl.env.turtle import Turtle
+from prospect_rl.env.turtle import FACING_VECTORS, Turtle
 
 # ---------------------------------------------------------------------------
 # Stub world — simple 3D grid for development before Phase 1 is ready
@@ -158,6 +162,11 @@ try:
 except ImportError:
     _RealWorld = None  # type: ignore[assignment, misc]
 
+try:
+    from prospect_rl.env.world.real_chunk_world import RealChunkWorld as _RealChunkWorld
+except ImportError:
+    _RealChunkWorld = None  # type: ignore[assignment, misc]
+
 
 # Pre-compute numpy arrays for block-to-channel mapping
 _SOLID_ARRAY = np.array(sorted(SOLID_BLOCKS), dtype=np.int8)
@@ -186,6 +195,8 @@ class MinecraftMiningEnv(gym.Env):
         seed: int | None = None,
         fixed_ore_index: int | None = None,
         forced_biome: int | None = None,
+        cache_dir: str | None = None,
+        required_biome: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -208,6 +219,11 @@ class MinecraftMiningEnv(gym.Env):
         self._fixed_ore_index: int | None = fixed_ore_index
         self._forced_biome: int | None = forced_biome
 
+        # Real chunk cache directory (for RealChunkWorld)
+        self._cache_dir: str | None = cache_dir
+        # Required biome for chunk filtering (for RealChunkWorld)
+        self._required_biome: int | None = required_biome
+
         # RNG
         self._seed = seed
         self._rng = np.random.default_rng(seed)
@@ -222,11 +238,11 @@ class MinecraftMiningEnv(gym.Env):
                 high=1.0,
                 shape=(
                     NUM_VOXEL_CHANNELS,
-                    OBS_WINDOW_Y,
-                    OBS_WINDOW_X,
-                    OBS_WINDOW_Z,
+                    FOG_WINDOW_Y,
+                    FOG_WINDOW_X,
+                    FOG_WINDOW_Z,
                 ),
-                dtype=np.float32,
+                dtype=np.float16,
             ),
             "scalars": spaces.Box(
                 low=-np.inf,
@@ -252,8 +268,22 @@ class MinecraftMiningEnv(gym.Env):
         self._step_count: int = 0
         self._max_steps: int = self._stage_cfg.max_episode_steps
 
+        # Fog-of-war memory grid (initialised in reset)
+        self._memory: np.ndarray | None = None
+        # Last inspected block types (front, above, below)
+        self._inspected_blocks: tuple[int, int, int] = (
+            int(BlockType.STONE), int(BlockType.AIR), int(BlockType.STONE),
+        )
+        # Discovered target ore positions (for discovery bonus)
+        self._discovered_ore_positions: set[tuple[int, int, int]] = set()
+        # Steps since agent last inspected a target ore
+        self._steps_since_ore_seen: int = 0
+
         # Stage detection
-        self._is_stage1: bool = (curriculum_stage == 0)
+        self._is_stage1: bool = (
+            self._stage_cfg.infinite_fuel
+            and self._stage_cfg.preference_mode == "one_hot"
+        )
 
         # Reward state (initialised in reset)
         self._reference_total: float = 0.0
@@ -266,7 +296,6 @@ class MinecraftMiningEnv(gym.Env):
         self._cumulative_waste_count: int = 0
         self._total_target_ores_in_world: int = 0
         self._ore_y_range: tuple[float, float] = (0.0, 39.0)
-        self._prev_nearest_target_dist: float = float("inf")
         self._prev_y_dist: float = 0.0
 
         # Spin detection state
@@ -303,7 +332,17 @@ class MinecraftMiningEnv(gym.Env):
 
         # Build world
         world_seed = int(self._rng.integers(0, 2**31))
-        if self._world_class is _StubWorld:
+        if (
+            _RealChunkWorld is not None
+            and self._world_class is _RealChunkWorld
+        ):
+            self._world = _RealChunkWorld(
+                size=ws,
+                seed=world_seed,
+                cache_dir=self._cache_dir or "data/chunk_cache/default",
+                required_biome=self._required_biome,
+            )
+        elif self._world_class is _StubWorld:
             self._world = _StubWorld(
                 size=ws,
                 rng=self._rng,
@@ -325,17 +364,31 @@ class MinecraftMiningEnv(gym.Env):
                 ),
             )
 
-        # Place turtle at centre X/Z, randomised Y within ±25% of centre
-        center_y = ws[1] // 2
-        jitter_range = max(1, ws[1] // 4)
-        spawn_y = int(self._rng.integers(
-            max(2, center_y - jitter_range),
-            min(ws[1] - 2, center_y + jitter_range) + 1,
-        ))
-        start_pos = np.array(
-            [ws[0] // 2, spawn_y, ws[2] // 2],
-            dtype=np.int32,
-        )
+        # Place turtle — use intelligent spawn for RealChunkWorld,
+        # randomised Y for procedural worlds
+        if (
+            _RealChunkWorld is not None
+            and isinstance(self._world, _RealChunkWorld)
+            and hasattr(self._world, "find_valid_spawn")
+        ):
+            sx, sy, sz = ws
+            spawn_x, spawn_y, spawn_z = self._world.find_valid_spawn(
+                sx // 2, sz // 2, rng=self._rng,
+            )
+            start_pos = np.array(
+                [spawn_x, spawn_y, spawn_z], dtype=np.int32,
+            )
+        else:
+            center_y = ws[1] // 2
+            jitter_range = max(1, ws[1] // 4)
+            spawn_y = int(self._rng.integers(
+                max(2, center_y - jitter_range),
+                min(ws[1] - 2, center_y + jitter_range) + 1,
+            ))
+            start_pos = np.array(
+                [ws[0] // 2, spawn_y, ws[2] // 2],
+                dtype=np.int32,
+            )
         # Clear the starting block so the turtle can stand there
         self._world[
             start_pos[0], start_pos[1], start_pos[2]
@@ -371,6 +424,17 @@ class MinecraftMiningEnv(gym.Env):
         tp = tuple(int(v) for v in self._turtle.position)
         self._explored.add(tp)
         self._explored_xz.add((tp[0], tp[2]))
+
+        # Fog-of-war memory: all unknown initially
+        ws = self._stage_cfg.world_size
+        self._memory = np.full(ws, MEMORY_UNKNOWN, dtype=np.int8)
+        self._discovered_ore_positions = set()
+        self._steps_since_ore_seen = 0
+
+        # Initial inspection: agent position (AIR) + 3 adjacent blocks
+        px, py, pz = int(self._turtle.position[0]), int(self._turtle.position[1]), int(self._turtle.position[2])
+        self._memory[px, py, pz] = int(BlockType.AIR)
+        self._inspected_blocks = self._inspect_three_blocks()
 
         self._step_count = 0
 
@@ -408,7 +472,6 @@ class MinecraftMiningEnv(gym.Env):
             )
             self._cumulative_waste_count = 0
             self._ore_y_range = self._compute_ore_y_range()
-            self._prev_nearest_target_dist = float("inf")
             # Compute initial Y-distance for progress shaping
             spawn_y = int(self._turtle.position[1])
             y_min, y_max = self._ore_y_range
@@ -473,6 +536,38 @@ class MinecraftMiningEnv(gym.Env):
             self._consecutive_turn_count = 0
             self._last_turn_direction = None
 
+        # --- Fog-of-war memory updates ---
+        assert self._memory is not None
+        px, py, pz = (
+            int(self._turtle.position[0]),
+            int(self._turtle.position[1]),
+            int(self._turtle.position[2]),
+        )
+        # Agent's current position is AIR
+        self._memory[px, py, pz] = int(BlockType.AIR)
+        # After a successful dig, mark dug position as AIR and
+        # inspect the block behind (dig-through reveal)
+        if block_mined is not None:
+            dig_target = self._get_dig_target_pos(action)
+            if dig_target is not None:
+                dtx, dty, dtz = dig_target
+                self._memory[dtx, dty, dtz] = int(BlockType.AIR)
+                # Dig-through: inspect block behind the dug block
+                behind = self._dig_through_target(action, dig_target)
+                if behind is not None:
+                    bx, by, bz = behind
+                    ws = self._world.shape
+                    if (
+                        0 <= bx < ws[0]
+                        and 0 <= by < ws[1]
+                        and 0 <= bz < ws[2]
+                    ):
+                        self._memory[bx, by, bz] = int(
+                            self._world[bx, by, bz],
+                        )
+        # Inspect 3 blocks (front, above, below) and track ore discovery
+        self._inspected_blocks = self._inspect_three_blocks()
+
         # Adjacent weight AFTER action (stages 2-5 only)
         if not self._is_stage1:
             adj_weight_post = (
@@ -524,7 +619,6 @@ class MinecraftMiningEnv(gym.Env):
 
         # Compute reward components (stage-aware)
         if self._is_stage1:
-            curr_dist = self._nearest_target_ore_dist()
             (
                 r_harvest, r_adjacent, r_clear, r_ops,
                 self._cumulative_waste_count,
@@ -541,10 +635,6 @@ class MinecraftMiningEnv(gym.Env):
                 ore_y_range=self._ore_y_range,
                 world_height=self._stage_cfg.world_size[1],
                 world_size=self._stage_cfg.world_size,
-                prev_nearest_target_dist=(
-                    self._prev_nearest_target_dist
-                ),
-                curr_nearest_target_dist=curr_dist,
                 total_target_ores_in_world=(
                     self._total_target_ores_in_world
                 ),
@@ -552,7 +642,12 @@ class MinecraftMiningEnv(gym.Env):
                 explored_xz_count=len(self._explored_xz),
                 prev_y_dist=self._prev_y_dist,
             )
-            self._prev_nearest_target_dist = curr_dist
+
+            # Ore discovery bonus: reward for first-time inspection
+            # of a cell containing a target ore
+            s1_cfg = Stage1RewardConfig()
+            r_clear += self._ore_discovery_reward * s1_cfg.ore_discovery_bonus
+
             # Update prev_y_dist for next step's progress shaping
             turtle_y_now = int(self._turtle.position[1])
             y_lo, y_hi = self._ore_y_range
@@ -564,7 +659,6 @@ class MinecraftMiningEnv(gym.Env):
                 self._prev_y_dist = 0.0
 
             # Arrival bonus: one-time reward for reaching target depth
-            s1_cfg = Stage1RewardConfig()
             turtle_y = int(self._turtle.position[1])
             y_min, y_max = self._ore_y_range
             if (
@@ -772,43 +866,147 @@ class MinecraftMiningEnv(gym.Env):
             return 0
         return self._world.count_blocks(target_ids)
 
-    def _nearest_target_ore_dist(self) -> float:
-        """Manhattan distance to nearest target ore in the obs window.
+    # ------------------------------------------------------------------
+    # Fog-of-war helpers
+    # ------------------------------------------------------------------
 
-        Scans the raw world data within the sliding window for blocks
-        matching the current preference.  Returns ``float('inf')`` if
-        no target ore is visible.
+    def _inspect_three_blocks(self) -> tuple[int, int, int]:
+        """Inspect front/above/below blocks and update memory.
+
+        Returns the block types at (front, above, below). Also tracks
+        new target ore discoveries and updates ``_ore_discovery_reward``.
         """
         assert self._turtle is not None and self._world is not None
+        assert self._memory is not None
         assert self._preference is not None
 
-        raw = self._world.get_sliding_window(
-            self._turtle.position,
-            radius_xz=OBS_WINDOW_RADIUS_XZ,
-            y_above=OBS_WINDOW_Y_ABOVE,
-            y_below=OBS_WINDOW_Y_BELOW,
-        )
+        pos = self._turtle.position
+        px, py, pz = int(pos[0]), int(pos[1]), int(pos[2])
+        ws = self._world.shape
+        self._ore_discovery_reward = 0
 
-        # Build boolean mask of target ore positions in raw (X, Y, Z)
-        target_mask = np.zeros(raw.shape, dtype=bool)
-        for i, ore_bt in enumerate(ORE_TYPES):
-            if self._preference[i] > 0:
-                target_mask |= raw == int(ore_bt)
+        def _inspect(x: int, y: int, z: int) -> int:
+            if 0 <= x < ws[0] and 0 <= y < ws[1] and 0 <= z < ws[2]:
+                block = int(self._world[x, y, z])
+                self._memory[x, y, z] = block
+                # Track target ore discovery
+                if block in _ORE_INDEX:
+                    idx = _ORE_INDEX[block]
+                    if self._preference[idx] > 0:
+                        self._steps_since_ore_seen = 0
+                        pos_t = (x, y, z)
+                        if pos_t not in self._discovered_ore_positions:
+                            self._discovered_ore_positions.add(pos_t)
+                            self._ore_discovery_reward += 1
+                return block
+            return int(BlockType.BEDROCK)
 
-        if not np.any(target_mask):
-            return float("inf")
+        # Front block
+        fv = FACING_VECTORS[self._turtle.facing]
+        front = _inspect(px + fv[0], py + fv[1], pz + fv[2])
+        # Above block
+        above = _inspect(px, py + 1, pz)
+        # Below block
+        below = _inspect(px, py - 1, pz)
 
-        # Agent is at center of window:
-        #   X = OBS_WINDOW_RADIUS_XZ
-        #   Y = OBS_WINDOW_Y_BELOW  (raw is X, Y, Z)
-        #   Z = OBS_WINDOW_RADIUS_XZ
-        center = np.array(
-            [OBS_WINDOW_RADIUS_XZ, OBS_WINDOW_Y_BELOW,
-             OBS_WINDOW_RADIUS_XZ],
-        )
-        coords = np.argwhere(target_mask)  # (N, 3)
-        dists = np.abs(coords - center).sum(axis=1)
-        return float(dists.min())
+        self._steps_since_ore_seen += 1
+        return front, above, below
+
+    def _get_dig_target_pos(
+        self, action: int,
+    ) -> tuple[int, int, int] | None:
+        """Return the world position targeted by a dig action."""
+        assert self._turtle is not None
+        pos = self._turtle.position
+        px, py, pz = int(pos[0]), int(pos[1]), int(pos[2])
+        if action == Action.DIG:
+            fv = FACING_VECTORS[self._turtle.facing]
+            return (px + fv[0], py + fv[1], pz + fv[2])
+        if action == Action.DIG_UP:
+            return (px, py + 1, pz)
+        if action == Action.DIG_DOWN:
+            return (px, py - 1, pz)
+        return None
+
+    def _dig_through_target(
+        self,
+        action: int,
+        dig_pos: tuple[int, int, int],
+    ) -> tuple[int, int, int] | None:
+        """Return the position behind a dug block for dig-through reveal."""
+        dx, dy, dz = dig_pos
+        if action == Action.DIG:
+            fv = FACING_VECTORS[self._turtle.facing]
+            return (dx + fv[0], dy + fv[1], dz + fv[2])
+        if action == Action.DIG_UP:
+            return (dx, dy + 1, dz)
+        if action == Action.DIG_DOWN:
+            return (dx, dy - 1, dz)
+        return None
+
+    def _get_memory_window(self) -> np.ndarray:
+        """Extract a fog-of-war observation window from memory.
+
+        Returns shape ``(FOG_WINDOW_X, FOG_WINDOW_Y, FOG_WINDOW_Z)``
+        as int8. Unexplored cells have value ``MEMORY_UNKNOWN``.
+        Out-of-bounds cells are also ``MEMORY_UNKNOWN``.
+        """
+        assert self._turtle is not None and self._memory is not None
+        pos = self._turtle.position
+        px, py, pz = int(pos[0]), int(pos[1]), int(pos[2])
+        sx, sy, sz = self._memory.shape
+
+        r = FOG_WINDOW_RADIUS_XZ
+        x0, x1 = px - r, px + r + 1
+        y0, y1 = py - FOG_WINDOW_Y_BELOW, py + FOG_WINDOW_Y_ABOVE + 1
+        z0, z1 = pz - r, pz + r + 1
+
+        # Compute padding for out-of-bounds
+        px0 = max(0, -x0)
+        px1 = max(0, x1 - sx)
+        py0 = max(0, -y0)
+        py1 = max(0, y1 - sy)
+        pz0 = max(0, -z0)
+        pz1 = max(0, z1 - sz)
+
+        chunk = self._memory[
+            max(0, x0):min(sx, x1),
+            max(0, y0):min(sy, y1),
+            max(0, z0):min(sz, z1),
+        ]
+
+        if px0 or px1 or py0 or py1 or pz0 or pz1:
+            window = np.pad(
+                chunk,
+                ((px0, px1), (py0, py1), (pz0, pz1)),
+                mode="constant",
+                constant_values=MEMORY_UNKNOWN,
+            )
+        else:
+            window = chunk.copy()
+
+        return window
+
+    @staticmethod
+    def _encode_block_one_hot(block_type: int) -> np.ndarray:
+        """Encode a single block as a NUM_VOXEL_CHANNELS one-hot vector."""
+        vec = np.zeros(NUM_VOXEL_CHANNELS, dtype=np.float32)
+        if block_type == MEMORY_UNKNOWN:
+            vec[CH_UNKNOWN] = 1.0
+        elif block_type in _ORE_INDEX:
+            vec[1 + _ORE_INDEX[block_type]] = 1.0
+        elif block_type == int(BlockType.AIR):
+            vec[CH_AIR] = 1.0
+        elif block_type == int(BlockType.BEDROCK):
+            vec[CH_BEDROCK] = 1.0
+        elif block_type in SOLID_BLOCKS:
+            vec[CH_SOLID] = 1.0
+        elif block_type in SOFT_BLOCKS:
+            vec[CH_SOFT] = 1.0
+        else:
+            # Unknown block type → treat as solid
+            vec[CH_SOLID] = 1.0
+        return vec
 
     def _compute_adjacent_desired_weight(self) -> float:
         """Sum preference weights of desired ores adjacent to the turtle.
@@ -842,8 +1040,6 @@ class MinecraftMiningEnv(gym.Env):
 
     def _get_dig_block(self, action: int) -> int | None:
         """Return block type at the dig target, or None."""
-        from prospect_rl.env.turtle import FACING_VECTORS
-
         assert self._turtle is not None and self._world is not None
         pos = self._turtle.position
 
@@ -866,7 +1062,22 @@ class MinecraftMiningEnv(gym.Env):
         return block
 
     def _build_obs(self) -> dict[str, np.ndarray]:
-        """Construct the observation dict from current state."""
+        """Construct the observation dict from current state.
+
+        Scalars layout (70 dims):
+          [0:3]   normalized position (x, y, z)
+          [3:7]   facing one-hot (4)
+          [7:8]   fuel fraction (1)
+          [8:16]  ore inventory (8)
+          [16:17] world height normalized (1)
+          [17:22] biome one-hot (5)
+          [22:37] front block inspection (15-ch one-hot)
+          [37:52] above block inspection (15-ch one-hot)
+          [52:67] below block inspection (15-ch one-hot)
+          [67]    fog density (fraction of memory window that is unknown)
+          [68]    steps since last ore seen (normalized)
+          [69]    total explored fraction
+        """
         assert self._turtle is not None and self._world is not None
 
         ws = np.array(self._world.shape, dtype=np.float32)
@@ -875,7 +1086,7 @@ class MinecraftMiningEnv(gym.Env):
         # --- Voxel tensor (C, Y, X, Z) ---
         voxel_tensor = self._build_voxel_tensor()
 
-        # --- Scalar features ---
+        # --- Scalar features (first 22: same as before) ---
         norm_pos = pos / ws
 
         facing_oh = np.zeros(4, dtype=np.float32)
@@ -896,8 +1107,49 @@ class MinecraftMiningEnv(gym.Env):
             [ws[1] / MAX_WORLD_HEIGHT], dtype=np.float32,
         )
 
+        # Biome at agent's XZ position (one-hot)
+        biome_oh = np.zeros(NUM_BIOME_TYPES, dtype=np.float32)
+        bx = min(int(pos[0]), self._world.biome_map.shape[0] - 1)
+        bz = min(int(pos[2]), self._world.biome_map.shape[1] - 1)
+        biome_id = int(self._world.biome_map[bx, bz])
+        if 0 <= biome_id < NUM_BIOME_TYPES:
+            biome_oh[biome_id] = 1.0
+
+        # --- Inspection vectors (45 dims: 3 blocks × 15 channels) ---
+        front_bt, above_bt, below_bt = self._inspected_blocks
+        inspect_front = self._encode_block_one_hot(front_bt)
+        inspect_above = self._encode_block_one_hot(above_bt)
+        inspect_below = self._encode_block_one_hot(below_bt)
+
+        # --- Fog density: fraction of memory window that is unknown ---
+        mem_window = self._get_memory_window()
+        total_cells = mem_window.size
+        unknown_cells = int(np.sum(mem_window == MEMORY_UNKNOWN))
+        fog_density = np.array(
+            [unknown_cells / max(total_cells, 1)],
+            dtype=np.float32,
+        )
+
+        # --- Steps since last ore seen (normalized by max_steps) ---
+        max_steps = self._stage_cfg.max_episode_steps
+        steps_since_ore = np.array(
+            [min(self._steps_since_ore_seen, max_steps)
+             / max(max_steps, 1)],
+            dtype=np.float32,
+        )
+
+        # --- Total explored fraction ---
+        world_volume = ws[0] * ws[1] * ws[2]
+        explored_frac = np.array(
+            [len(self._explored) / max(world_volume, 1)],
+            dtype=np.float32,
+        )
+
         scalars = np.concatenate([
             norm_pos, facing_oh, fuel, inv, world_height_norm,
+            biome_oh,
+            inspect_front, inspect_above, inspect_below,
+            fog_density, steps_since_ore, explored_frac,
         ])
 
         return {
@@ -907,54 +1159,54 @@ class MinecraftMiningEnv(gym.Env):
         }
 
     def _build_voxel_tensor(self) -> np.ndarray:
-        """Build (C, Y, X, Z) multi-channel voxel observation.
+        """Build (C, Y, X, Z) multi-channel voxel observation from memory.
 
-        Channels: 0-7 per-ore, 8 solid, 9 soft, 10 air,
-        11 bedrock, 12 explored.  Numpy-vectorized.
+        Channels: 0 unknown, 1-8 per-ore, 9 solid, 10 soft, 11 air,
+        12 bedrock, 13 explored, 14 target.  Numpy-vectorized.
         """
-        assert self._turtle is not None and self._world is not None
+        assert self._turtle is not None and self._memory is not None
 
-        raw = self._world.get_sliding_window(
-            self._turtle.position,
-            radius_xz=OBS_WINDOW_RADIUS_XZ,
-            y_above=OBS_WINDOW_Y_ABOVE,
-            y_below=OBS_WINDOW_Y_BELOW,
-        )
-
-        # raw: (X, Y, Z) int8 → transpose to (Y, X, Z)
+        # raw: (X, Y, Z) int8 from fog-of-war memory
+        raw = self._get_memory_window()
+        # Transpose to (Y, X, Z) for channel-first layout
         raw_yxz = raw.transpose(1, 0, 2)
 
         tensor = np.zeros(
             (
                 NUM_VOXEL_CHANNELS,
-                OBS_WINDOW_Y,
-                OBS_WINDOW_X,
-                OBS_WINDOW_Z,
+                FOG_WINDOW_Y,
+                FOG_WINDOW_X,
+                FOG_WINDOW_Z,
             ),
-            dtype=np.float32,
+            dtype=np.float16,
         )
 
-        # Per-ore channels (0 .. NUM_ORE_TYPES-1)
+        # Channel 0: UNKNOWN (fog)
+        tensor[CH_UNKNOWN] = (
+            raw_yxz == MEMORY_UNKNOWN
+        ).astype(np.float16)
+
+        # Per-ore channels (1 .. NUM_ORE_TYPES)
         for i, ore_bt in enumerate(ORE_TYPES):
-            tensor[i] = (raw_yxz == int(ore_bt)).astype(
-                np.float32,
+            tensor[1 + i] = (raw_yxz == int(ore_bt)).astype(
+                np.float16,
             )
 
         # Grouped channels
         tensor[CH_SOLID] = np.isin(
             raw_yxz, _SOLID_ARRAY,
-        ).astype(np.float32)
+        ).astype(np.float16)
         tensor[CH_SOFT] = np.isin(
             raw_yxz, _SOFT_ARRAY,
-        ).astype(np.float32)
+        ).astype(np.float16)
         tensor[CH_AIR] = (
             raw_yxz == int(BlockType.AIR)
-        ).astype(np.float32)
+        ).astype(np.float16)
         tensor[CH_BEDROCK] = (
             raw_yxz == int(BlockType.BEDROCK)
-        ).astype(np.float32)
+        ).astype(np.float16)
 
-        # Explored mask channel
+        # Explored mask channel (physically visited positions)
         tensor[CH_EXPLORED] = self._build_explored_mask()
 
         # Target ore highlight: fuse per-ore channels weighted by
@@ -965,7 +1217,7 @@ class MinecraftMiningEnv(gym.Env):
             if self._preference[i] > 0:
                 np.maximum(
                     target_mask,
-                    self._preference[i] * tensor[i],
+                    self._preference[i] * tensor[1 + i],
                     out=target_mask,
                 )
         tensor[CH_TARGET] = target_mask
@@ -973,31 +1225,47 @@ class MinecraftMiningEnv(gym.Env):
         return tensor
 
     def _build_explored_mask(self) -> np.ndarray:
-        """Build explored mask matching (Y, X, Z) window shape."""
+        """Build explored mask matching (Y, X, Z) window shape.
+
+        Uses vectorized numpy operations instead of a Python loop.
+        """
         assert self._turtle is not None
-        mask = np.zeros(
-            (OBS_WINDOW_Y, OBS_WINDOW_X, OBS_WINDOW_Z),
-            dtype=np.float32,
-        )
+        if not self._explored:
+            return np.zeros(
+                (FOG_WINDOW_Y, FOG_WINDOW_X, FOG_WINDOW_Z),
+                dtype=np.float16,
+            )
+
         pos = self._turtle.position
         px, py, pz = int(pos[0]), int(pos[1]), int(pos[2])
 
-        for ex, ey, ez in self._explored:
-            wx = ex - px + OBS_WINDOW_RADIUS_XZ
-            wy = ey - (py - OBS_WINDOW_Y_BELOW)
-            wz = ez - pz + OBS_WINDOW_RADIUS_XZ
-            if (
-                0 <= wx < OBS_WINDOW_X
-                and 0 <= wy < OBS_WINDOW_Y
-                and 0 <= wz < OBS_WINDOW_Z
-            ):
-                mask[wy, wx, wz] = 1.0
+        coords = np.array(list(self._explored), dtype=np.int32)
+        wx = coords[:, 0] - px + FOG_WINDOW_RADIUS_XZ
+        wy = coords[:, 1] - (py - FOG_WINDOW_Y_BELOW)
+        wz = coords[:, 2] - pz + FOG_WINDOW_RADIUS_XZ
 
+        valid = (
+            (wx >= 0) & (wx < FOG_WINDOW_X)
+            & (wy >= 0) & (wy < FOG_WINDOW_Y)
+            & (wz >= 0) & (wz < FOG_WINDOW_Z)
+        )
+
+        mask = np.zeros(
+            (FOG_WINDOW_Y, FOG_WINDOW_X, FOG_WINDOW_Z),
+            dtype=np.float16,
+        )
+        mask[wy[valid], wx[valid], wz[valid]] = 1.0
         return mask
 
     def _build_info(self) -> dict[str, Any]:
         """Build the info dict returned alongside observations."""
         assert self._turtle is not None
+        world_type = (
+            "real"
+            if _RealChunkWorld is not None
+            and isinstance(self._world, _RealChunkWorld)
+            else "sim"
+        )
         return {
             "fuel": self._turtle.fuel,
             "position": self._turtle.position.copy(),
@@ -1005,4 +1273,5 @@ class MinecraftMiningEnv(gym.Env):
             "step": self._step_count,
             "explored_count": len(self._explored),
             "explored_xz_count": len(self._explored_xz),
+            "world_type": world_type,
         }
