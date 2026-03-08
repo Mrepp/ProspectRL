@@ -2,7 +2,9 @@
 
 Loads cached ``.npz`` chunks (produced by ``prospect_rl.tools.cache_chunks``)
 and renders ores, bedrock, biome overlay, and ore counts.  Press **N** / **P**
-to cycle through chunks.
+to cycle through chunks.  Press **T** to toggle between the cached chunk view
+and a prior-derived probabilistic view that shows where the analytical prior
+predicts ore should be (sampled from the 1.21.11 worldgen-derived prior).
 
 Usage::
 
@@ -20,11 +22,12 @@ import os
 
 import numpy as np
 import pyvista as pv
-from prospect_rl.config import BiomeType, BlockType
+from prospect_rl.config import BiomeType, BlockType, ORE_TYPES
 
 # ── Block / biome appearance ─────────────────────────────────────────
 
 BLOCK_COLORS: dict[int, str] = {
+    BlockType.AIR: "#aaddff",
     BlockType.COAL_ORE: "#3d3d3d",
     BlockType.IRON_ORE: "#d4a373",
     BlockType.GOLD_ORE: "#fcf051",
@@ -109,8 +112,12 @@ FILLER_ORDER = [
 _ORE_ACTORS = [f"ore_{bt}" for bt in ORE_ORDER]
 _FILLER_ACTORS = [f"filler_{bt}" for bt in FILLER_ORDER]
 _BIOME_ACTORS = [f"biome_{bt}" for bt in BiomeType]
+_PRIOR_ACTORS = [f"prior_{bt}" for bt in ORE_ORDER]
 _TEXT_ACTORS = ["title", "info", "ore_counts", "bedrock"]
-_ALL_ACTORS = _ORE_ACTORS + _FILLER_ACTORS + _BIOME_ACTORS + _TEXT_ACTORS
+_ALL_ACTORS = (
+    _ORE_ACTORS + _FILLER_ACTORS + _BIOME_ACTORS
+    + _PRIOR_ACTORS + _TEXT_ACTORS
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -304,6 +311,108 @@ def _print_chunk_stats(chunk_data: dict) -> None:
     print()
 
 
+# ── Prior sampling ────────────────────────────────────────────────────
+
+# Map ORE_TYPES index to BlockType for the prior view
+_ORE_INDEX_TO_BLOCK: dict[int, int] = {
+    i: int(bt) for i, bt in enumerate(ORE_TYPES)
+}
+
+
+def _sample_prior_blocks(
+    biome_map: np.ndarray,
+    world_height: int,
+    seed: int = 0,
+) -> np.ndarray:
+    """Sample a block grid from the analytical prior.
+
+    For each voxel (x, y, z), queries the prior for P(ore_type | y, biome)
+    and samples whether each ore is present using those probabilities.
+    When multiple ores hit, the rarest one wins.
+
+    Returns an int8 array of shape ``(sx, world_height, sz)`` with
+    BlockType values (0=AIR, ore IDs for sampled ores).
+    """
+    from multiagent.geological_prior import AnalyticalPrior
+
+    sx, sz = biome_map.shape
+    prior = AnalyticalPrior(world_height=world_height)
+
+    blocks = np.zeros((sx, world_height, sz), dtype=np.int8)
+    rng = np.random.default_rng(seed)
+
+    # Pre-query the prior for each (y, biome) pair
+    for y in range(world_height):
+        for biome_id in range(5):
+            probs = prior.query(y, biome_id)  # shape (8,)
+
+            # Find columns with this biome
+            biome_mask = biome_map == biome_id
+            xs, zs = np.where(biome_mask)
+            if len(xs) == 0:
+                continue
+
+            n_cols = len(xs)
+            # For each ore type, sample independently
+            for ore_idx in range(8):
+                p = float(probs[ore_idx])
+                if p <= 0:
+                    continue
+                rolls = rng.random(n_cols)
+                hits = rolls < p
+                if not np.any(hits):
+                    continue
+                bt = _ORE_INDEX_TO_BLOCK[ore_idx]
+                # Only place if currently AIR (rarer ores placed later
+                # overwrite common ones via ORE_ORDER)
+                hit_x = xs[hits]
+                hit_z = zs[hits]
+                blocks[hit_x, y, hit_z] = np.int8(bt)
+
+    return blocks
+
+
+def _prior_expected_text(
+    prior_table: np.ndarray,
+    biome_map: np.ndarray,
+    world_height: int,
+) -> str:
+    """Build text showing expected ore counts from the prior."""
+    from multiagent.geological_prior import AnalyticalPrior
+
+    prior = AnalyticalPrior(world_height=world_height)
+    sx, sz = biome_map.shape
+
+    # Compute expected count per ore across all columns
+    lines: list[str] = []
+    total = 0.0
+    for ore_idx, bt in enumerate(ORE_ORDER):
+        # Find this ore's index in the ORE_TYPES list
+        oi = None
+        for j, obt in enumerate(ORE_TYPES):
+            if int(obt) == int(bt):
+                oi = j
+                break
+        if oi is None:
+            continue
+
+        expected = 0.0
+        for biome_id in range(5):
+            biome_count = int(np.sum(biome_map == biome_id))
+            if biome_count == 0:
+                continue
+            for y in range(world_height):
+                expected += float(prior._table[oi, y, biome_id]) * biome_count
+        if expected > 0.01:
+            lines.append(f"  {BLOCK_NAMES[bt]:<10} {expected:>8.1f}")
+            total += expected
+
+    if not lines:
+        return "No expected ores"
+    lines.append(f"  {'Total':<10} {total:>8.1f}")
+    return "\n".join(lines)
+
+
 # ── Rendering ─────────────────────────────────────────────────────────
 
 
@@ -445,6 +554,99 @@ def _render_chunk(
     pl.render()
 
 
+# ── Prior view rendering ──────────────────────────────────────────────
+
+
+def _render_prior(
+    pl: pv.Plotter,
+    chunk_data: dict,
+    chunk_index: int,
+    total_chunks: int,
+    seed: int = 0,
+) -> None:
+    """Render a prior-sampled view of the same chunk's biome layout."""
+    biome_map = chunk_data["biome_map"]
+    metadata = chunk_data["metadata"]
+    filename = chunk_data["filename"]
+    full_y = chunk_data.get("full_y", int(metadata[1]))
+
+    # Remove previous actors
+    for actor_name in _ALL_ACTORS:
+        try:
+            pl.remove_actor(actor_name)
+        except Exception:
+            pass
+
+    # Sample blocks from the prior using this chunk's biome map
+    prior_blocks = _sample_prior_blocks(biome_map, full_y, seed=seed)
+
+    # Crop to content range (same as chunk view)
+    y_lo, y_hi = _content_y_range(prior_blocks)
+    cropped = prior_blocks[:, y_lo:y_hi + 1, :]
+    sx, sy, sz = cropped.shape
+
+    # Render sampled ores
+    for bt in ORE_ORDER:
+        mesh = _voxels_for_block(cropped, bt)
+        if mesh is not None:
+            count = int(np.sum(cropped == bt))
+            pl.add_mesh(
+                mesh,
+                color=BLOCK_COLORS[bt],
+                label=f"{BLOCK_NAMES[bt]} ({count:,})",
+                opacity=0.85,
+                name=f"prior_{bt}",
+            )
+
+    # Biome overlay
+    _add_biome_overlay(pl, biome_map)
+
+    # Text overlays
+    mc_y_min = int(metadata[3])
+    mc_y_max = int(metadata[4])
+    biome_text = _biome_summary(biome_map)
+
+    info_text = (
+        f"PRIOR VIEW - {filename}"
+        f"  ({chunk_index + 1}/{total_chunks})\n"
+        f"Size: {sx}x{full_y}x{sz}"
+        f"  (showing Y {y_lo}-{y_hi})\n"
+        f"MC Y: {mc_y_min} to {mc_y_max}\n"
+        f"Biome: {biome_text}\n"
+        f"Press T for chunk view"
+    )
+    pl.add_text(
+        info_text, position="upper_right",
+        font_size=10, color="#ffcc00",
+        name="info",
+    )
+
+    pl.add_text(
+        f"Analytical Prior View — {filename}",
+        position="upper_left",
+        font_size=12, color="#ffcc00",
+        name="title",
+    )
+
+    # Show both sampled counts and expected counts
+    ore_text = "Sampled Counts:\n" + _ore_count_text(prior_blocks)
+    pl.add_text(
+        ore_text, position="lower_right",
+        font_size=10, color="#cccccc",
+        name="ore_counts",
+    )
+
+    # Camera
+    center = np.array([sx / 2, sy / 2, sz / 2])
+    max_dim = max(sx, sy, sz)
+    pl.camera.focal_point = center
+    pl.camera.position = center + np.array([
+        max_dim * 1.5, max_dim * 1.2, max_dim * 1.5,
+    ])
+
+    pl.render()
+
+
 # ── Main viewer ───────────────────────────────────────────────────────
 
 
@@ -462,7 +664,7 @@ def visualize_chunks(
     indices = list(range(total))
     rng.shuffle(indices)
 
-    state = {"idx": 0}
+    state = {"idx": 0, "prior_mode": False}
 
     # Load first chunk
     first = _load_chunk(chunk_files[indices[0]])
@@ -481,6 +683,7 @@ def visualize_chunks(
         "Controls:\n"
         "  N  next chunk\n"
         "  P  previous chunk\n"
+        "  T  toggle prior view\n"
         "  Mouse drag to rotate"
     )
     pl.add_text(
@@ -489,23 +692,40 @@ def visualize_chunks(
         name="controls",
     )
 
+    def _refresh() -> None:
+        """Re-render current chunk in the active mode."""
+        idx = indices[state["idx"]]
+        chunk_data = _load_chunk(chunk_files[idx])
+        try:
+            pl.remove_legend()
+        except Exception:
+            pass
+        if state["prior_mode"]:
+            _render_prior(
+                pl, chunk_data, state["idx"], total, seed=seed,
+            )
+        else:
+            _render_chunk(
+                pl, chunk_data, state["idx"], total, show_fillers,
+            )
+        pl.add_legend(bcolor=(0.1, 0.1, 0.2, 0.8), face=None)
+
     def _cycle(delta: int) -> None:
         state["idx"] = (state["idx"] + delta) % total
         idx = indices[state["idx"]]
         chunk_data = _load_chunk(chunk_files[idx])
         _print_chunk_stats(chunk_data)
-        # Remove stale legend before re-render
-        try:
-            pl.remove_legend()
-        except Exception:
-            pass
-        _render_chunk(
-            pl, chunk_data, state["idx"], total, show_fillers,
-        )
-        pl.add_legend(bcolor=(0.1, 0.1, 0.2, 0.8), face=None)
+        _refresh()
+
+    def _toggle_prior() -> None:
+        state["prior_mode"] = not state["prior_mode"]
+        mode = "PRIOR" if state["prior_mode"] else "CHUNK"
+        print(f"Switched to {mode} view")
+        _refresh()
 
     pl.add_key_event("n", lambda: _cycle(1))
     pl.add_key_event("p", lambda: _cycle(-1))
+    pl.add_key_event("t", _toggle_prior)
 
     print("Opening chunk viewer...  (close window to exit)")
     pl.show()

@@ -39,7 +39,12 @@ class Turtle:
     # ------------------------------------------------------------------
 
     def _can_move_to(self, target: np.ndarray, world: object) -> bool:
-        """Check if the turtle can move to *target* position."""
+        """Check if the turtle can move to *target* position.
+
+        WARNING: This only checks block type (AIR), NOT occupancy.
+        In multi-agent contexts, always call
+        ``SharedWorld.can_move_to()`` first to prevent collisions.
+        """
         world_size = np.array(world.shape, dtype=np.int32)
         # Out of bounds
         if np.any(target < 0) or np.any(target >= world_size):

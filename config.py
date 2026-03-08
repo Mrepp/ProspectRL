@@ -168,113 +168,233 @@ class OreSpawnConfig:
     cluster_threshold: float = 0.5          # noise threshold for cluster formation
 
 
-# -- Ore spawn configs (Minecraft Java Edition parity) ---------------------
+# -- Ore spawn configs (derived from vanilla 1.21.11 worldgen JSON) --------
 
-ORE_SPAWN_CONFIGS: list[OreSpawnConfig] = [
-    # Coal (2 configs)
-    OreSpawnConfig(
-        BlockType.COAL_ORE, spawn_size=17, spawn_tries=20,
-        y_min_mc=0, y_max_mc=192, distribution="triangle",
-        peak_mc=96, noise_scale=15, cluster_threshold=0.5,
-    ),
-    OreSpawnConfig(
-        BlockType.COAL_ORE, spawn_size=17, spawn_tries=30,
-        y_min_mc=136, y_max_mc=256, distribution="uniform",
-        noise_scale=12, cluster_threshold=0.45,
-    ),
-    # Iron (3 configs)
-    OreSpawnConfig(
-        BlockType.IRON_ORE, spawn_size=9, spawn_tries=10,
-        y_min_mc=-64, y_max_mc=72, distribution="uniform",
-        noise_scale=18, cluster_threshold=0.55,
-    ),
-    OreSpawnConfig(
-        BlockType.IRON_ORE, spawn_size=9, spawn_tries=10,
-        y_min_mc=-24, y_max_mc=56, distribution="triangle",
-        peak_mc=16, noise_scale=18, cluster_threshold=0.55,
-    ),
-    OreSpawnConfig(
-        BlockType.IRON_ORE, spawn_size=9, spawn_tries=90,
-        y_min_mc=80, y_max_mc=384, distribution="triangle",
-        peak_mc=232, noise_scale=14, cluster_threshold=0.4,
-    ),
-    # Gold (3 configs)
-    OreSpawnConfig(
-        BlockType.GOLD_ORE, spawn_size=9, spawn_tries=4,
-        y_min_mc=-64, y_max_mc=32, distribution="triangle",
-        peak_mc=-16, noise_scale=20, cluster_threshold=0.65,
-    ),
-    OreSpawnConfig(
-        BlockType.GOLD_ORE, spawn_size=9, spawn_tries=0.5,
-        y_min_mc=-64, y_max_mc=-48, distribution="uniform",
-        noise_scale=20, cluster_threshold=0.65,
-    ),
-    OreSpawnConfig(
-        BlockType.GOLD_ORE, spawn_size=9, spawn_tries=50,
-        y_min_mc=32, y_max_mc=256, distribution="uniform",
-        biomes=[BiomeType.BADLANDS], noise_scale=16, cluster_threshold=0.45,
-    ),
-    # Diamond (3 configs)
-    OreSpawnConfig(
-        BlockType.DIAMOND_ORE, spawn_size=4, spawn_tries=7,
-        y_min_mc=-64, y_max_mc=16, distribution="triangle",
-        peak_mc=-59, air_exposure_skip=0.5,
-        noise_scale=25, cluster_threshold=0.7,
-    ),
-    OreSpawnConfig(
-        BlockType.DIAMOND_ORE, spawn_size=8, spawn_tries=1,
-        y_min_mc=-64, y_max_mc=16, distribution="triangle",
-        peak_mc=-59, air_exposure_skip=1.0,
-        noise_scale=25, cluster_threshold=0.7,
-    ),
-    OreSpawnConfig(
-        BlockType.DIAMOND_ORE, spawn_size=12, spawn_tries=0.111,
-        y_min_mc=-64, y_max_mc=16, distribution="triangle",
-        peak_mc=-59, air_exposure_skip=0.7,
-        noise_scale=22, cluster_threshold=0.65,
-    ),
-    # Redstone (2 configs)
-    OreSpawnConfig(
-        BlockType.REDSTONE_ORE, spawn_size=8, spawn_tries=4,
-        y_min_mc=-64, y_max_mc=15, distribution="uniform",
-        noise_scale=18, cluster_threshold=0.6,
-    ),
-    OreSpawnConfig(
-        BlockType.REDSTONE_ORE, spawn_size=8, spawn_tries=8,
-        y_min_mc=-63, y_max_mc=-32, distribution="triangle",
-        peak_mc=-59, noise_scale=18, cluster_threshold=0.6,
-    ),
-    # Emerald (1 config — Mountains only)
-    OreSpawnConfig(
-        BlockType.EMERALD_ORE, spawn_size=1, spawn_tries=100,
-        y_min_mc=-16, y_max_mc=320, distribution="triangle",
-        peak_mc=236, biomes=[BiomeType.MOUNTAINS],
-        noise_scale=30, cluster_threshold=0.75,
-    ),
-    # Lapis Lazuli (2 configs)
-    OreSpawnConfig(
-        BlockType.LAPIS_ORE, spawn_size=7, spawn_tries=4,
-        y_min_mc=-32, y_max_mc=32, distribution="triangle",
-        peak_mc=0, noise_scale=10, cluster_threshold=0.45,
-    ),
-    OreSpawnConfig(
-        BlockType.LAPIS_ORE, spawn_size=7, spawn_tries=6,
-        y_min_mc=-64, y_max_mc=64, distribution="uniform",
-        air_exposure_skip=1.0, noise_scale=10, cluster_threshold=0.45,
-    ),
-    # Copper (2 configs)
-    OreSpawnConfig(
-        BlockType.COPPER_ORE, spawn_size=10, spawn_tries=16,
-        y_min_mc=-16, y_max_mc=112, distribution="triangle",
-        peak_mc=48, noise_scale=18, cluster_threshold=0.55,
-    ),
-    OreSpawnConfig(
-        BlockType.COPPER_ORE, spawn_size=20, spawn_tries=16,
-        y_min_mc=-16, y_max_mc=112, distribution="triangle",
-        peak_mc=48, biomes=[BiomeType.DRIPSTONE_CAVES],
-        noise_scale=16, cluster_threshold=0.5,
-    ),
-]
+# Per-ore clustering parameters for the world generator.  These are
+# ProspectRL-specific (no MC JSON equivalent) and preserved for world-gen
+# continuity.
+_DEFAULT_CLUSTERING: dict[BlockType, tuple[float, float]] = {
+    BlockType.COAL_ORE:     (15.0, 0.50),
+    BlockType.IRON_ORE:     (18.0, 0.55),
+    BlockType.GOLD_ORE:     (20.0, 0.65),
+    BlockType.DIAMOND_ORE:  (25.0, 0.70),
+    BlockType.REDSTONE_ORE: (18.0, 0.60),
+    BlockType.EMERALD_ORE:  (30.0, 0.75),
+    BlockType.LAPIS_ORE:    (10.0, 0.45),
+    BlockType.COPPER_ORE:   (18.0, 0.55),
+}
+
+# Maps MC ore block names → our BlockType enum.
+_MC_BLOCK_TO_BLOCKTYPE: dict[str, BlockType] = {
+    "coal_ore": BlockType.COAL_ORE,
+    "deepslate_coal_ore": BlockType.COAL_ORE,
+    "iron_ore": BlockType.IRON_ORE,
+    "deepslate_iron_ore": BlockType.IRON_ORE,
+    "gold_ore": BlockType.GOLD_ORE,
+    "deepslate_gold_ore": BlockType.GOLD_ORE,
+    "diamond_ore": BlockType.DIAMOND_ORE,
+    "deepslate_diamond_ore": BlockType.DIAMOND_ORE,
+    "redstone_ore": BlockType.REDSTONE_ORE,
+    "deepslate_redstone_ore": BlockType.REDSTONE_ORE,
+    "emerald_ore": BlockType.EMERALD_ORE,
+    "deepslate_emerald_ore": BlockType.EMERALD_ORE,
+    "lapis_ore": BlockType.LAPIS_ORE,
+    "deepslate_lapis_ore": BlockType.LAPIS_ORE,
+    "copper_ore": BlockType.COPPER_ORE,
+    "deepslate_copper_ore": BlockType.COPPER_ORE,
+}
+
+
+def _worldgen_to_ore_spawn_configs() -> list[OreSpawnConfig]:
+    """Generate ORE_SPAWN_CONFIGS from parsed vanilla 1.21.11 worldgen JSON.
+
+    Reads placed/configured feature files under ``data/worldgen/`` and
+    converts each relevant placed feature into an :class:`OreSpawnConfig`.
+    Falls back to the legacy hardcoded list if the JSON files are not found.
+    """
+    try:
+        from env.worldgen_parser import (
+            get_ore_features_per_biome_group,
+            load_worldgen,
+        )
+        wg = load_worldgen()
+    except (FileNotFoundError, ImportError):
+        # Fall back to empty list — will be caught below
+        return _legacy_ore_spawn_configs()
+
+    configs: list[OreSpawnConfig] = []
+
+    # Build biome-group → feature set for biome filtering
+    biome_group_features = get_ore_features_per_biome_group(wg.biome_profiles)
+    plains_features = biome_group_features.get(0, set())
+
+    for pf in wg.placed_features.values():
+        if pf.configured is None:
+            continue
+
+        # Map to our BlockType
+        block_type = _MC_BLOCK_TO_BLOCKTYPE.get(pf.configured.ore_block)
+        if block_type is None:
+            continue
+
+        # Determine biome restriction: if this feature is NOT in the
+        # plains (default) set, find which biome groups have it.
+        biomes: list[BiomeType] | None = None
+        if pf.name not in plains_features:
+            biome_list: list[BiomeType] = []
+            _group_to_biome = {
+                1: BiomeType.MOUNTAINS,
+                2: BiomeType.BADLANDS,
+                3: BiomeType.DRIPSTONE_CAVES,
+                4: BiomeType.LUSH_CAVES,
+            }
+            for gid, biome_enum in _group_to_biome.items():
+                if pf.name in biome_group_features.get(gid, set()):
+                    biome_list.append(biome_enum)
+            if biome_list:
+                biomes = biome_list
+
+        # Map distribution type to what OreDistributor expects.
+        # Trapezoid with plateau=0 and peak=None (midpoint) is handled
+        # by ore_distribution.py's triangle code path.
+        dist = pf.height_distribution
+        distribution = "triangle" if dist.dist_type == "trapezoid" else "uniform"
+
+        noise_scale, cluster_threshold = _DEFAULT_CLUSTERING.get(
+            block_type, (20.0, 0.5),
+        )
+
+        configs.append(OreSpawnConfig(
+            block_type=block_type,
+            spawn_size=pf.configured.size,
+            spawn_tries=pf.attempt_model.expected_attempts,
+            y_min_mc=dist.min_inclusive,
+            y_max_mc=dist.max_inclusive,
+            distribution=distribution,
+            peak_mc=None,  # Trapezoid is symmetric about midpoint
+            air_exposure_skip=pf.configured.discard_chance_on_air_exposure,
+            biomes=biomes,
+            noise_scale=noise_scale,
+            cluster_threshold=cluster_threshold,
+        ))
+
+    if not configs:
+        return _legacy_ore_spawn_configs()
+
+    return configs
+
+
+def _legacy_ore_spawn_configs() -> list[OreSpawnConfig]:
+    """Hardcoded fallback configs (pre-JSON-parser)."""
+    return [
+        # Coal (2 configs)
+        OreSpawnConfig(
+            BlockType.COAL_ORE, spawn_size=17, spawn_tries=20,
+            y_min_mc=0, y_max_mc=192, distribution="triangle",
+            peak_mc=96, noise_scale=15, cluster_threshold=0.5,
+        ),
+        OreSpawnConfig(
+            BlockType.COAL_ORE, spawn_size=17, spawn_tries=30,
+            y_min_mc=136, y_max_mc=256, distribution="uniform",
+            noise_scale=12, cluster_threshold=0.45,
+        ),
+        # Iron (3 configs)
+        OreSpawnConfig(
+            BlockType.IRON_ORE, spawn_size=9, spawn_tries=10,
+            y_min_mc=-64, y_max_mc=72, distribution="uniform",
+            noise_scale=18, cluster_threshold=0.55,
+        ),
+        OreSpawnConfig(
+            BlockType.IRON_ORE, spawn_size=9, spawn_tries=10,
+            y_min_mc=-24, y_max_mc=56, distribution="triangle",
+            peak_mc=16, noise_scale=18, cluster_threshold=0.55,
+        ),
+        OreSpawnConfig(
+            BlockType.IRON_ORE, spawn_size=9, spawn_tries=90,
+            y_min_mc=80, y_max_mc=384, distribution="triangle",
+            peak_mc=232, noise_scale=14, cluster_threshold=0.4,
+        ),
+        # Gold (3 configs)
+        OreSpawnConfig(
+            BlockType.GOLD_ORE, spawn_size=9, spawn_tries=4,
+            y_min_mc=-64, y_max_mc=32, distribution="triangle",
+            peak_mc=-16, noise_scale=20, cluster_threshold=0.65,
+        ),
+        OreSpawnConfig(
+            BlockType.GOLD_ORE, spawn_size=9, spawn_tries=0.5,
+            y_min_mc=-64, y_max_mc=-48, distribution="uniform",
+            noise_scale=20, cluster_threshold=0.65,
+        ),
+        OreSpawnConfig(
+            BlockType.GOLD_ORE, spawn_size=9, spawn_tries=50,
+            y_min_mc=32, y_max_mc=256, distribution="uniform",
+            biomes=[BiomeType.BADLANDS], noise_scale=16,
+            cluster_threshold=0.45,
+        ),
+        # Diamond (3 configs)
+        OreSpawnConfig(
+            BlockType.DIAMOND_ORE, spawn_size=4, spawn_tries=7,
+            y_min_mc=-64, y_max_mc=16, distribution="triangle",
+            peak_mc=-59, air_exposure_skip=0.5,
+            noise_scale=25, cluster_threshold=0.7,
+        ),
+        OreSpawnConfig(
+            BlockType.DIAMOND_ORE, spawn_size=8, spawn_tries=1,
+            y_min_mc=-64, y_max_mc=16, distribution="triangle",
+            peak_mc=-59, air_exposure_skip=1.0,
+            noise_scale=25, cluster_threshold=0.7,
+        ),
+        OreSpawnConfig(
+            BlockType.DIAMOND_ORE, spawn_size=12, spawn_tries=0.111,
+            y_min_mc=-64, y_max_mc=16, distribution="triangle",
+            peak_mc=-59, air_exposure_skip=0.7,
+            noise_scale=22, cluster_threshold=0.65,
+        ),
+        # Redstone (2 configs)
+        OreSpawnConfig(
+            BlockType.REDSTONE_ORE, spawn_size=8, spawn_tries=4,
+            y_min_mc=-64, y_max_mc=15, distribution="uniform",
+            noise_scale=18, cluster_threshold=0.6,
+        ),
+        OreSpawnConfig(
+            BlockType.REDSTONE_ORE, spawn_size=8, spawn_tries=8,
+            y_min_mc=-63, y_max_mc=-32, distribution="triangle",
+            peak_mc=-59, noise_scale=18, cluster_threshold=0.6,
+        ),
+        # Emerald (1 config — Mountains only)
+        OreSpawnConfig(
+            BlockType.EMERALD_ORE, spawn_size=1, spawn_tries=100,
+            y_min_mc=-16, y_max_mc=320, distribution="triangle",
+            peak_mc=236, biomes=[BiomeType.MOUNTAINS],
+            noise_scale=30, cluster_threshold=0.75,
+        ),
+        # Lapis Lazuli (2 configs)
+        OreSpawnConfig(
+            BlockType.LAPIS_ORE, spawn_size=7, spawn_tries=4,
+            y_min_mc=-32, y_max_mc=32, distribution="triangle",
+            peak_mc=0, noise_scale=10, cluster_threshold=0.45,
+        ),
+        OreSpawnConfig(
+            BlockType.LAPIS_ORE, spawn_size=7, spawn_tries=6,
+            y_min_mc=-64, y_max_mc=64, distribution="uniform",
+            air_exposure_skip=1.0, noise_scale=10, cluster_threshold=0.45,
+        ),
+        # Copper (2 configs)
+        OreSpawnConfig(
+            BlockType.COPPER_ORE, spawn_size=10, spawn_tries=16,
+            y_min_mc=-16, y_max_mc=112, distribution="triangle",
+            peak_mc=48, noise_scale=18, cluster_threshold=0.55,
+        ),
+        OreSpawnConfig(
+            BlockType.COPPER_ORE, spawn_size=20, spawn_tries=16,
+            y_min_mc=-16, y_max_mc=112, distribution="triangle",
+            peak_mc=48, biomes=[BiomeType.DRIPSTONE_CAVES],
+            noise_scale=16, cluster_threshold=0.5,
+        ),
+    ]
+
+
+ORE_SPAWN_CONFIGS: list[OreSpawnConfig] = _worldgen_to_ore_spawn_configs()
 
 # -- Filler block spawn configs -------------------------------------------
 
@@ -562,6 +682,24 @@ SCALAR_OBS_DIM: int = (
 )  # 70
 
 MAX_WORLD_HEIGHT: int = 384
+
+# ---------------------------------------------------------------------------
+# Multi-Agent Extensions
+# ---------------------------------------------------------------------------
+
+# Extra voxel channel for agent density in multi-agent mode
+CH_AGENT_DENSITY: int = NUM_VOXEL_CHANNELS  # 15
+NUM_MULTI_VOXEL_CHANNELS: int = NUM_VOXEL_CHANNELS + 1  # 16
+
+# Multi-agent scalar obs: base 70 + rel_xyz(3) + distance(1) + task_onehot(4)
+#   + boundary_dist(1) + inside_flag(1) = 80
+SCALAR_OBS_DIM_MULTI: int = SCALAR_OBS_DIM + 10  # 80
+
+# Chunk size for belief map aggregation
+CHUNK_SIZE_XZ: int = 16
+
+# Pre-computed ore-type index lookup (block_type_int -> ore_index)
+ORE_INDEX: dict[int, int] = {int(bt): i for i, bt in enumerate(ORE_TYPES)}
 
 # Legacy aliases for backward compatibility (deployment/inference_server.py)
 OBS_WINDOW_RADIUS_XZ: int = FOG_WINDOW_RADIUS_XZ

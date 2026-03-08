@@ -1,227 +1,243 @@
-Analyze ProspectRL PPO training logs and diagnose training issues.
+You are a senior ML/RL engineer with 10+ years of experience in reinforcement
+learning, multi-agent systems, and curriculum-based training. You have been
+brought in to review a training pipeline before a long (multi-day) training
+run begins.
 
-ProspectRL trains RL agents for multi-agent cooperative mining in Minecraft, where agents learn to navigate 3D voxel worlds and mine ores guided by a tunable preference vector over 8 ore types. The long-term goal is teams of agents that can be configured via preferences to target specific ores efficiently.
+## Project Goal
+Train ComputerCraft turtles to mine efficiently in a Minecraft-like 3D voxel
+world, coordinated by a Bayesian GNN-based orchestrator. Individual agents use
+a FiLM+SE CNN policy with action masking for local mining. A centralized
+coordinator builds a heterogeneous graph (agents + region nodes), runs GATv2Conv
+message passing, and uses Hungarian matching to assign agents to high-value
+chunks. The system progresses through 4 training phases:
 
-If the user provided training log data as arguments ($ARGUMENTS), use that data. Otherwise, ask the user to paste their training metrics (TensorBoard scalars, stdout logs, or CSV dumps).
+- **Phase 1**: Single-agent task mastery (MOVE_TO, EXCAVATE, MINE_ORE,
+  RETURN_TO) with random TaskSampler assignments, curriculum difficulty 0→2
+- **Phase 2**: Multi-agent execution with heuristic coordinator, scaling
+  4→8→16→32 agents over 2M steps
+- **Phase 3**: Coordinator GNN training via REINFORCE (agents frozen),
+  entropy bonus to prevent assignment collapse
+- **Phase 4**: Joint fine-tuning with blended heuristic/GNN assignment,
+  alpha schedule [0.1, 0.3, 0.6, 1.0]
 
-## Step 1: Discover and Read the Codebase
+Agents sense 3 blocks per step (front/above/below via turtle.inspect()),
+navigate via A* when far from targets, switch to RL policy within mining
+radius (8 blocks), and report telemetry that updates a shared Bernoulli
+belief map with cluster propagation.
 
-File paths shift between commits. Do NOT hardcode paths — discover them dynamically.
+Success means: agents navigate to the correct Y-depth for their assigned
+ore, mine target ore efficiently, avoid waste blocks, stay within assigned
+bounding boxes, and collectively maximize team ore yield — not just wander
+or dig randomly.
 
-### 1a. Discover all Python source files
+Your job is to perform a rigorous pre-training audit. You are skeptical,
+thorough, and cost-conscious — GPU hours are expensive and a wasted run is
+unacceptable. You check for silent bugs that only manifest after millions of
+steps. Every check should be evaluated against the end goal: does this help
+agents learn to mine target ore under coordinator direction?
 
-Run: `find . -name "*.py" -not -path "*/__pycache__/*" -not -path "*/.venv/*" -not -path "*/venv/*" | sort`
+Given the environment code, training config, reward functions, and multi-agent
+infrastructure, perform the following checks:
 
-This gives you the ground truth of what exists right now.
+## 1. Observation Space Audit
+- Verify voxel tensor dimensions: (16, FOG_Y, FOG_X, FOG_Z) — 15 base
+  channels + 1 agent density channel. Confirm channel assignments match
+  constants (CH_UNKNOWN=0, ore channels 1-8, CH_SOLID=9, CH_SOFT=10,
+  CH_AIR=11, CH_BEDROCK=12, CH_EXPLORED=13, CH_TARGET=14, CH_AGENT_DENSITY=15)
+- Verify scalar obs dimensions: 80 total (70 base + 10 task extras).
+  Manually count the concatenation: pos(3) + facing(4) + fuel(1) + inv(8) +
+  world_h(1) + biome(5) + inspect_front(15) + inspect_above(15) +
+  inspect_below(15) + fog_density(1) + steps_since_ore(1) + explored_frac(1)
+  + extra(10). Confirm each sub-vector is computed correctly
+- Check for dead features (e.g., steps_since_ore always 0.0 in multi-agent env)
+- Verify fog-of-war memory is correctly initialized (MEMORY_UNKNOWN) and
+  updated only from actual 3-block inspections — no omniscient leakage
+- Confirm agent density channel excludes self (exclude_agent parameter)
+- Verify preference vector (8-dim) is correctly set from TaskAssignment
+- Check that observations are built AFTER action execution and inspection,
+  not before
+- Confirm observation normalization: are voxel channels in [0,1]? Are scalars
+  in comparable ranges? Does VecNormalize only apply to scalars key?
 
-### 1b. Read all critical files (in parallel where possible)
+## 2. Action Space & Masking Audit
+- Confirm 8 discrete actions: FORWARD, UP, DOWN, TURN_LEFT, TURN_RIGHT,
+  DIG, DIG_UP, DIG_DOWN
+- Verify action masking: turns always valid, movement needs AIR target,
+  dig needs solid target (not AIR, not BEDROCK)
+- Check that multi-agent action masking additionally blocks movement into
+  positions occupied by other agents
+- Verify A*-mode action override: when is_astar_mode=True, the RL action
+  is replaced by pathfinder action. Confirm this doesn't corrupt the policy
+  gradient (A*-mode steps should not contribute to RL loss)
+- Check dig-before-move sequence in A* pathfinder: does vertical dig-through
+  correctly queue the follow-up movement action?
+- Verify that Turtle movement/dig methods work correctly when passed
+  SharedWorld (duck-typed as World via __getitem__ and shape)
 
-Read EVERY file in the following categories. If a file doesn't exist at the expected path, search for it using the file list from 1a. The codebase is small enough to read entirely — do NOT skip files.
+## 3. Reward Function Audit (Task Rewards)
+- Compute expected reward per step at key states for each task type:
+  (a) idle at spawn, (b) navigating toward target, (c) inside bounding box
+  mining waste, (d) inside bounding box mining target ore
+- Check boundary shaping: +0.05/step inside box, -0.2/step outside.
+  Verify this creates correct gradient (agent should prefer being inside)
+- For MOVE_TO: verify potential-based progress reward scales correctly
+  with world_diagonal normalization. Check that completion (dist ≤ 1)
+  fires exactly once
+- For EXCAVATE: verify block_cleared_reward (0.05) + 3x bonus for target
+  ore. Check completion condition (blocks_cleared ≥ budget)
+- For MINE_ORE: confirm target ore gives 2x progress vs 0.5x non-target.
+  Verify task_complete is always False (coordinator decides)
+- Look for degenerate optima: can agent maximize reward by staying in
+  bounding box doing nothing? (idle_penalty should prevent this)
+- Verify reward config defaults match between compute_task_reward() function
+  signature and MultiAgentConfig dataclass — any drift?
+- Check that task reward parameters are actually passed from config to
+  the reward function (not just relying on defaults)
 
-**Reward system (how reward signals are computed):**
-- Find and read the file containing `Stage1RewardConfig` and `RewardConfig` dataclasses (currently `config.py`). These define ALL reward hyperparameter defaults.
-- Find and read the file containing `compute_stage1_reward_components()` and `compute_reward_components()` (currently `env/reward_vector.py`). This is the core reward math.
-- Find and read the file containing `PreferenceManager` and `scalarize()` (currently `env/preference.py`). This shows how the 4 reward components are combined into a single scalar.
+## 4. Occupancy & Collision Audit
+- Verify SharedWorld occupancy grid is updated atomically on move_agent()
+- Check the critical path: Turtle.move_forward(SharedWorld) → _can_move_to()
+  → SharedWorld.__getitem__() → raw World grid. Does this bypass the
+  occupancy grid? Can two agents collide?
+- Verify move_agent() return value is checked after successful turtle move.
+  If occupancy update fails, is the turtle position reverted?
+- Check spawn_positions(): minimum Manhattan distance constraint, clearance
+  to AIR, max_attempts bound
+- Verify deregister_agent() correctly clears occupancy at old position
 
-**Environment (how the agent interacts with the world):**
-- Find and read the main environment file containing `MinecraftMiningEnv` (currently `env/mining_env.py`). Pay close attention to:
-  - `reset()` — how state is initialized, how preference is sampled, how `_prev_y_dist` and other shaping state is set
-  - `step()` — how reward components from `compute_stage1_reward_components()` are augmented with spin/loiter/noop/idle penalties in `r_ops`, the Y-arrival bonus added to `r_clear`, and how terminal bonus is added
-  - `_build_obs()` and `_build_voxel_tensor()` — what the agent actually sees (channel layout, scalar features, target ore highlight channel)
-  - `_nearest_target_ore_dist()` — used for approach bonus shaping
-- Find and read the action masking file (currently `env/action_masking.py`) — which actions are masked and why (movement needs AIR, dig needs solid, turns always valid)
-- Find and read the turtle state file (currently `env/turtle.py`) — movement/dig mechanics, fuel consumption, inventory tracking
+## 5. Belief Map & Telemetry Audit
+- Verify telemetry event flow: agent step → _inspect_three_blocks() →
+  _emit_block_observed() → SharedWorld.record_telemetry() →
+  flush_telemetry() → BeliefMap.process_events()
+- Check cluster propagation math: boost = λ * exp(-dist/r), applied only
+  to unobserved neighbors, capped at p=1.0
+- Verify _update_chunk_for_voxel() correctness — but flag its O(chunk_volume)
+  cost. With 16×16×H chunks, how many dict lookups per step with 32 agents?
+- Check chunk state transitions: UNKNOWN → PARTIALLY_EXPLORED → EXPLORED
+  (>80%) → EXHAUSTED (all E_remaining < ε). Are these monotonic?
+- Verify BLOCK_CHANGED and PATH_BLOCKED invalidation: does reverting to
+  prior (deleting from _observed) correctly re-query the geological prior?
+- Check that flush_telemetry() returns a fresh dict (not a reference to
+  the internal buffer that gets cleared)
 
-**Model architecture (what the neural network looks like):**
-- Find and read the feature extractor file (currently `models/policy_network.py`). Understand:
-  - The 3D CNN architecture (conv layers, FiLM conditioning from preference vector, squeeze-excitation attention)
-  - How voxel, scalar, and preference branches are combined
-  - Output dimensionality of each branch and total features_dim
-- Find and read the PPO model factory (currently `models/ppo_config.py`). Understand:
-  - `make_training_env()` — how environments are created, VecNormalize setup (`norm_obs_keys=["scalars"]`), deterministic ore-to-env assignment (`fixed_ore_index = i % NUM_ORE_TYPES`)
-  - `create_ppo_model()` — how MaskablePPO is configured, learning rate schedule (linear decay), policy_kwargs, net_arch for pi and vf heads
-- Find and read the PPO hyperparameters: `PPOConfig` dataclass (currently in `config.py`) — learning_rate, n_steps, batch_size, n_epochs, gamma, gae_lambda, clip_range, ent_coef, vf_coef, max_grad_norm, pi/vf net_arch
+## 6. A* Pathfinder Audit
+- Verify 6-connected grid (no diagonals — turtles can't move diagonally)
+- Check cost field: 1.0 for air, +dig_cost for solid, +congestion near
+  agents. Verify congestion uses exponential decay, not hard cutoff
+- Check action conversion: _direction_to_facing() maps (dx, dz) to
+  facing index. Verify facing convention matches FACING_VECTORS
+  (0=+z, 1=+x, 2=-z, 3=-x)
+- Verify dig-before-move: when path goes through solid, does the
+  pathfinder return DIG first, then queue FORWARD via _pending_dig_action?
+  Does this work for vertical movement (DIG_UP → UP, DIG_DOWN → DOWN)?
+- Check path invalidation: is_path_affected() correctly detects changed
+  blocks on the remaining path (not already-traversed segments)
+- Verify _compute_turn() handles 180° turns (diff=2) — returns TURN_RIGHT,
+  requiring 2 consecutive turn steps
 
-**Training orchestration:**
-- Find and read `train.py` — how training is launched, callback setup, checkpoint resume logic
-- Find and read the callbacks file (currently `models/callbacks.py`). Read `MetricsCallback` carefully to confirm ACTUAL metric names logged to TensorBoard — these names change between versions.
+## 7. GNN Coordinator Audit
+- Verify heterogeneous graph construction:
+  - Agent nodes: 24 features (position, fuel, inventory, assignment, pref)
+  - Region nodes: 20 features (center, expected_remaining, info_gain, biome)
+  - Edge types: agent→region (bipartite), region→agent, agent↔agent (nearby),
+    region↔region (4-adjacent)
+- Check region feature normalization: is expected_remaining normalized
+  globally across all chunks, or per-chunk? (Per-chunk destroys cross-region
+  comparison)
+- Verify Hungarian matching sign convention: negate GNN scores for
+  linear_sum_assignment (which minimizes cost)
+- Check padding for more agents than regions: high-cost dummy columns
+- Verify coordinator stores intermediates (x_dict, edge_index_dict,
+  row_idx, col_idx) for REINFORCE training in Phase 3
+- Check that CoordinatorGNNSimple (MLP fallback) produces compatible
+  output shape (N_agents, N_regions)
 
-**World generation (affects ore availability and training difficulty):**
-- Find and read the world file (currently `env/world/world.py`) — generation pipeline order (stone → bedrock → biome → deepslate → fillers → ores → caves)
-- Find and read ore distribution (currently `env/world/ore_distribution.py`) — how `OreSpawnConfig` parameters translate to actual ore placement probability, spatial clustering, biome restrictions
-- Find and read biome generation (currently `env/world/biome.py`) — how biome map is generated, which biomes exist, noise thresholds
-- Find and read `ORE_SPAWN_CONFIGS` and `FILLER_SPAWN_CONFIGS` (currently in `config.py`) — the actual per-ore spawn parameters
+## 8. MultiAgentVecEnv & Training Loop Audit
+- Verify auto-reset: when agent is terminated/truncated, does the env
+  auto-reset and store terminal_observation in info?
+- Check that reset re-assigns tasks from coordinator
+- Verify observation stacking: _stack_obs() produces batched arrays
+  with correct shapes for SB3 compatibility
+- Confirm return types: rewards as np.float32 array, terminated/truncated
+  as bool arrays
+- Does MultiAgentVecEnv expose observation_space, action_space, close(),
+  env_method(), get_attr(), set_attr() for SB3 compatibility?
+- Verify Phase 2 loads the Phase 1 trained policy (not random actions)
+- Check agent count scaling curriculum: 4→8→16→32 every 500K steps
+- Verify Phase 3 REINFORCE: advantage = team_reward - EMA_baseline,
+  policy_loss = -log_prob * advantage, entropy bonus, grad clipping
 
-**Curriculum system:**
-- Find and read `CURRICULUM_STAGES` (currently in `config.py`) — world size, ore density multiplier, fuel, caves, preference mode, max steps, advancement criteria per stage
+## 9. Phase 1 Task Sampler Audit
+- Verify sampling weights: MOVE_TO 35%, EXCAVATE 40%, MINE_ORE 20%,
+  RETURN_TO 5%. Confirm these sum to 1.0
+- Check curriculum difficulty: bbox half_size [12, 8, 5], MOVE_TO distance
+  [10, 20, 40], EXCAVATE budget [20, 50, 100]
+- Verify task assignments produce valid bounding boxes (within world bounds)
+- Check that MINE_ORE tasks set seed_position correctly
+- Verify difficulty callback promotes at 33%/66% of total timesteps
 
-**Observation space:**
-- Find and read observation constants: `OBS_WINDOW_*`, `NUM_VOXEL_CHANNELS`, `SCALAR_OBS_DIM`, channel index constants (`CH_SOLID`, `CH_TARGET`, etc.) — currently in `config.py`
+## 10. Geological Prior & World Consistency
+- Verify AnalyticalPrior builds correct P(ore|y,biome) table from either
+  worldgen JSON (with solid fraction correction, vein geometry, air-exposure
+  discard) or legacy ORE_SPAWN_CONFIGS fallback
+- Check MC→sim Y-coordinate conversion: sim_y = (mc_y - MC_Y_MIN) / MC_Y_RANGE * h
+- Verify calibration table loading and application (multiplicative factors
+  per ore per Y-band)
+- Confirm prior is queried correctly by BeliefMap for unobserved voxels
+- Check that World and SharedWorld expose compatible interfaces (shape,
+  __getitem__, __setitem__, biome_map, count_blocks)
 
-### 1c. Build a mental model
+## 11. Packaging & Dependencies
+- Verify pyproject.toml lists all subpackages:
+  prospect_rl.multiagent.{agent, coordinator, training}
+- Check that scipy is declared as a dependency (used by Hungarian matching)
+- Verify torch_geometric is listed as optional (with MLP fallback)
+- Confirm editable vs non-editable install both work
 
-After reading, you should be able to answer these questions (verify each against the code you read):
+## 12. Quick Sanity Tests to Run Before Training
+- [ ] Phase1TaskEnv: reset + 100 random steps, no crash, obs shapes match
+- [ ] MultiAgentVecEnv with 4 agents: reset + 50 steps, no occupancy violations
+- [ ] SharedWorld: register/move/deregister 10 agents, occupancy consistent
+- [ ] BeliefMap: process 100 synthetic BLOCK_OBSERVED events, verify chunk
+      states transition correctly
+- [ ] AStarPathfinder: find path in 20x20x20 world, verify action sequence
+      reaches goal. Test vertical dig-through specifically
+- [ ] MultiAgentFeatureExtractor: forward pass with (16, 11, 7, 7) voxels +
+      80 scalars + 8 pref → verify output dim = 328
+- [ ] Coordinator: build graph with 8 agents + 4 chunks, run GNN forward +
+      Hungarian matching, verify assignments are valid
+- [ ] CoordinatorTrainer: one REINFORCE update, verify loss is finite
+- [ ] TaskSampler: sample 1000 tasks, verify distribution matches weights
+- [ ] Checkpoint save/load round-trip: policy outputs match within 1e-6
+- [ ] Belief map cluster propagation: place ore at (10,10,10), verify
+      neighbors get boosted probability, confirmed voxels are not modified
+- [ ] VecNormalize wrapping: confirm only scalars key is normalized
+- [ ] Auto-reset: truncate one agent, verify it resets and gets new assignment
+- [ ] Action masking with occupancy: agent A at (5,5,5), agent B at (5,5,6),
+      verify A cannot FORWARD when facing +z
 
-1. **Reward assembly**: What is the exact per-step reward formula? Trace from `compute_stage1_reward_components()` return values through `mining_env.py:step()` (where spin/loiter/noop/idle are added to r_ops, y_arrival_bonus to r_clear) through `PreferenceManager.scalarize()` (harvest_alpha * r_harvest + r_adjacent + r_clear + r_ops) plus terminal_bonus.
+For each issue found, classify it as:
+- 🔴 BLOCKER — will cause training failure, crash, or silent corruption
+- 🟡 WARNING — may degrade performance, waste compute, or cause subtle issues
+- 🟢 NOTE — minor improvement, style suggestion, or documentation mismatch
 
-2. **Action masking**: Which actions can be masked? (movement needs AIR target, dig needs solid target, turns always valid). How does this interact with noop_penalty? (noop fires on failed movement, but masked actions shouldn't be selected — so noop only fires if masking has a bug or if the agent is against a world boundary)
+Be specific. Cite file paths and line numbers. Show expected vs actual values.
+Do not hand-wave — if you can't verify something, say so and recommend a test.
 
-3. **Observation space**: What does the agent see? (14-channel 3D voxel tensor with per-ore channels + solid/soft/air/bedrock/explored/target, 17-dim scalar vector with normalized position + facing one-hot + fuel fraction + inventory counts + world height, 8-dim preference vector)
+## 13. Action Plan
 
-4. **VecNormalize**: What is normalized? (Only "scalars" key — voxels and pref are NOT normalized. Reward IS normalized.)
+After completing all audit sections above, launch a **Plan agent** (using the Task tool with `subagent_type: "Plan"`) to produce a concrete implementation plan. Pass the agent a summary of all findings from the audit (blockers, warnings, and notes with file paths and line numbers).
 
-5. **Ore availability**: For the current curriculum stage, how many target ores actually exist in the world? This depends on world_size, ore_density_multiplier, the specific OreSpawnConfig parameters, and biome forcing.
+The Plan agent should:
 
-6. **Agent spawn**: Where does the agent start? (center X/Z, randomized Y within ±25% of world center). How far is this from typical target ore Y-ranges?
+1. Review the audit findings provided to it
+2. Perform its own independent exploration of the codebase to verify findings and discover any additional issues the audit missed
+3. Prioritize fixes by impact: blockers first, then warnings likely to waste compute, then nice-to-haves
+4. Produce a step-by-step implementation plan with:
+   - Exact files and functions to modify
+   - What each change should do (with code-level specifics)
+   - Dependency ordering (which fixes must come before others)
+   - Estimated risk of each change (safe refactor vs behavioral change requiring re-testing)
+5. Include a verification checklist: tests to run after each fix to confirm correctness
 
-7. **Model capacity**: Is the network big enough? (3-layer 3D CNN with 32→64→128 channels + FiLM + SE, FC to 256, scalar MLP to 32, total 296 features → pi_net [64,64] and vf_net [128,128])
-
-## Step 2: Identify Training Stage
-
-Determine the curriculum stage from the logs. Look for:
-- `curriculum/stage` metric (0-4)
-- Stage-specific metrics (e.g. `target_ores_mined` and `completion_ratio` for Stage 1, `harvest_potential` for later stages)
-- Cross-reference metric names against what `MetricsCallback` actually logs — names evolve as the codebase changes
-
-## Step 3: Parse and Categorize Metrics
-
-Organize all available metrics into these categories:
-
-**Mining Performance:**
-- `target_ores_mined` — target ores per episode (Stage 1). Zero = agent not finding/mining target.
-- `completion_ratio` — target_mined / total_in_world. Zero = no progress.
-- `cumulative_waste` — non-target blocks mined (Stage 1). High waste + zero target = indiscriminate mining.
-- `ores_per_episode` — all ores mined (including non-target).
-- `blocks_per_episode` — total blocks mined (ores + stone/dirt).
-- `fuel_efficiency` — ores per step.
-- `harvest_potential` — cumulative potential value (Stages 2-5).
-
-**Navigation:**
-- Y-penalty metric (check actual name in callbacks — Stage 1 uses `cumulative_y_penalty`, Stages 2-5 use `cumulative_adjacent_penalty`) — total Y-distance penalty. Large negative = never reaching correct depth.
-- `explored_count` — unique 3D cells visited. For 40x40x40 world: <100 stuck, 200-400 decent, >500 good.
-- `episode_steps` — if always = max_steps (1000 for Stage 1), episodes always time out.
-
-**PPO Diagnostics:**
-- `entropy_loss` — policy randomness. Healthy: 0.5–1.5 for 8 actions (max entropy = ln(8) ≈ 2.08). <0.3 collapsed, >1.8 too random.
-- `approx_kl` — policy change per update. Healthy: 0.005–0.02. >0.03 unstable, <0.001 not learning.
-- `explained_variance` — value function quality. >0.5 good, <0.2 broken, negative = worse than mean.
-- `clip_fraction` — PPO clipping rate. Healthy: 0.05–0.2. >0.3 learning rate too high.
-- `policy_gradient_loss` — should be negative.
-- `value_loss` — should decrease over time.
-
-**Reward Components:**
-- `cumulative_harvest_delta` — sum of r_harvest per episode. Zero = no target ores mined.
-- `terminal_bonus` — end-of-episode completion bonus (Stage 1).
-- `local_clears` — count of local-clear events (Stages 2-5).
-
-## Step 4: Diagnose Issues
-
-Check for these failure patterns IN ORDER OF SEVERITY:
-
-### Critical (training is broken)
-1. **Entropy collapse** (`entropy_loss < 0.3`): Policy locked into one action. Penalties dominate rewards. Fix: raise `ent_coef`, reduce penalty magnitudes, increase `clip_range`.
-2. **Value function failure** (`explained_variance < 0`): Value predictions anti-correlated with returns. Fix: check reward budget balance, reduce reward variance, consider lower `gamma`.
-3. **KL explosion** (`approx_kl > 0.05`): Policy updates too large. Fix: reduce `learning_rate`, reduce `clip_range`, increase `batch_size`.
-
-### Major (agent not learning the right thing)
-4. **Zero target ores** (`target_ores_mined=0`, `cumulative_harvest_delta=0`): Agent mines but never hits target. Check:
-   - Y-penalty magnitude: large negative → agent not at correct depth → increase `y_penalty_scale`, `y_progress_scale`, `y_arrival_bonus`
-   - Small Y-penalty but still zero target → agent at depth but not mining right blocks → increase `per_ore_reward`, check abundance multiplier for rare ores
-5. **High waste, zero target** (`cumulative_waste >> 0`, `target_ores_mined=0`): Agent mines indiscriminately. Ore targeting signal too weak vs mining incentives. Fix: increase `per_ore_reward`, possibly increase `waste_beta` (but only after agent learns depth).
-6. **Agent not mining** (`blocks_per_episode < 10`): Agent moves but doesn't dig. May be stuck in movement loops or penalties make "do nothing" optimal. Check reward budget — if net per-step reward is negative for a random-but-moving agent, the agent learns to minimize actions.
-
-### Moderate (learning but suboptimal)
-7. **Low exploration** (`explored_count < 100` in 40x40x40): Agent stuck in small area. Fix: increase `loiter_penalty`, `exploration_bonus`, `xz_exploration_bonus`.
-8. **High clip fraction** (`clip_fraction > 0.3`): Fix: reduce `learning_rate`, increase `n_steps`.
-9. **Entropy too high** (`entropy_loss > 1.8` after 100k+ steps): Reward signal too weak or noisy. Check reward budget, reduce `ent_coef`.
-10. **Always timeout** (`episode_steps = max_steps` consistently past 200k steps): Task too hard or reward too sparse.
-
-### Architecture-specific issues
-11. **FiLM not conditioning**: If agent ignores preference (mines same ore regardless of pref vector), the FiLM layers may not be learning useful modulation. Check if preference-conditioned eval shows similar performance across all ore types. The FiLM init is near-identity (gamma≈1, beta≈0) which is conservative — may need more training steps.
-12. **VecNormalize reward clipping**: Rewards are clipped to ±10.0. If raw rewards regularly exceed this (e.g., large y_arrival_bonus + per_ore_reward in same step), the agent sees clipped values and loses gradient information.
-13. **Linear LR schedule**: Learning rate decays linearly to 0. If training for <1M steps, the LR may drop too fast. Check if `approx_kl` is dropping to near-zero late in training.
-
-## Step 5: Reward Budget Analysis
-
-This is the most important diagnostic. Compute approximate per-step reward budget using ACTUAL config values read from the source files in Step 1.
-
-**Stage 1 positive signals:**
-- Per target ore: `per_ore_reward * pref * abundance_mult` (amortized: multiply by expected ores mined / max_steps)
-- Y-arrival bonus: `y_arrival_bonus` (one-time, added to r_clear, amortize over steps to reach depth)
-- Exploration: `exploration_bonus / (1 + count/halflife)` per new cell
-- XZ exploration: `xz_exploration_bonus / (1 + count/halflife)` per new column at depth (only when y_min <= turtle_y <= y_max)
-- Y-progress: `y_progress_scale * (prev_frac - curr_frac)` per step moving toward target Y
-- Approach bonus: `approach_bonus_scale * (prev_dist - curr_dist)` when target ore is visible in obs window
-- Terminal bonus: `completion_scale * ratio` (episode end only)
-
-**Stage 1 negative signals (every step):**
-- Time: `time_penalty` (constant, in r_ops from compute fn)
-- Y-distance: `-y_penalty_scale * (dist/height)^2 - y_penalty_base` (off-depth, in r_adjacent)
-- Idle: `idle_penalty_scale * max(0, steps_since_dig - grace)` (capped at -0.5, added to r_ops in step())
-- Loiter: `loiter_penalty` (when <unique_threshold unique positions in loiter_window-step window, added to r_ops in step())
-- Waste: `-waste_beta * (count/ramp)^alpha` (added to r_ops in compute fn)
-- Spin: `spin_penalty` (3+ consecutive same turns, added to r_ops in step())
-- Noop: `noop_penalty` (failed movement, added to r_ops in step())
-
-**Scalarization**: `R = harvest_alpha * r_harvest + r_adjacent + r_clear + r_ops + terminal_bonus`
-
-Note: `r_ops` accumulates values from BOTH the compute function (time_penalty + waste) AND mining_env.py step() (spin + loiter + noop + idle). Watch for assignment-vs-accumulation bugs.
-
-**If net per-step reward is negative for a "random but moving" agent, the agent learns to minimize actions. This is the #1 training failure mode.**
-
-Compute approximate budgets for: (a) random agent, (b) agent at correct depth mining randomly, (c) ideal agent mining target. The gaps between these tell you how learnable the reward landscape is.
-
-Also consider:
-- **Reward variance**: Large one-time bonuses (y_arrival, terminal) create high variance in episode returns, making the value function harder to learn. Compare one-time bonus magnitude to cumulative per-step reward.
-- **Reward delay**: How many steps before the agent gets its first positive signal? If it takes 50+ steps of negative reward before any positive, the credit assignment problem is severe.
-- **Action masking impact**: With action masking, the effective action space is often 3-5 actions (not 8). This means max entropy is lower, so entropy_loss thresholds should be adjusted. Healthy entropy with masking may be 0.4-1.2.
-
-## Step 6: Model Architecture Analysis
-
-Check if the model architecture is appropriate for the current training stage:
-
-- **Feature extractor capacity**: The 3D CNN processes a 14×32×9×9 tensor. With stride-2 convolutions, the spatial dimensions shrink to ~4×2×2 by layer 3. Verify the CNN isn't throwing away too much spatial information.
-- **FiLM conditioning strength**: FiLM layers modulate CNN features based on preference. If training is stuck on Stage 1 (one-hot preferences), FiLM may not get diverse enough conditioning signals to learn useful modulation.
-- **Policy/value head separation**: Separate net_arch for pi and vf allows different capacity. If value_loss is high but policy is learning, vf may need more capacity (or vice versa).
-- **Total parameter count**: Estimate from architecture. If the model is too large for the data throughput (n_envs * n_steps per update), it may overfit within each rollout.
-
-## Step 7: Output Structured Analysis
-
-Format your response as:
-
-### Training Diagnosis: [Stage Name]
-
-**Summary**: [1-2 sentence overview of what's happening and how it relates to the goal of training preference-conditioned mining agents]
-
-**Codebase Snapshot** (from files read in Step 1):
-| Parameter | Value | Source File |
-|---|---|---|
-| [key reward/PPO params] | [actual value] | [file:line] |
-
-**Red Flags**:
-- [Bullet list of most concerning metrics with values]
-
-**Issue #1: [Name]** (Severity: Critical/Major/Moderate)
-- What: [What the metric shows]
-- Why: [Root cause based on reward logic, model architecture, and config values — cite specific code paths]
-- Fix: In `[file_path]`, change `param` from `current_value` to `suggested_value` — [reason]
-
-[Continue for top 3-5 issues]
-
-**Reward Budget**:
-| Signal | Per-Step Value | Notes |
-|---|---|---|
-| [component] | [value] | [amortized or direct, cite formula from source] |
-| **Net per step (random agent)** | **[sum]** | |
-| **Net per step (at depth, mining randomly)** | **[sum]** | |
-| **Net per step (ideal agent)** | **[sum]** | |
-
-**Architecture Notes**:
-- [Any concerns about model capacity, FiLM conditioning, obs space issues]
-
-**Recommended Changes** (priority order):
-1. In `[file_path]` `[class/function]`: change `param` from `X` to `Y` — [reason with reference to reward budget or architecture analysis]
-2. ...
-
-**What to Monitor After Changes**:
-- [metric to watch and expected direction]
+Present the final plan to the user for approval before any changes are made.

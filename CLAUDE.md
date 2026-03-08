@@ -2,16 +2,235 @@
 
 ## Project Overview
 
-PPO-based RL for ComputerCraft turtle mining in Minecraft. A turtle agent learns to navigate 3D voxel worlds and mine ores guided by a preference vector over 8 ore types.
+PPO-based RL for ComputerCraft turtle mining in Minecraft. Supports both **single-agent** training (curriculum stages 0-5) and **multi-agent** coordination (32-100+ turtles in a shared world). A centralized Bayesian coordinator orchestrates agents via GNN-based task assignment, while individual agents use a FiLM+SE policy for local mining.
 
 ## Quick Reference
 
-- **Entry points**: `train.py` (training), `evaluate.py` (eval), `deployment/inference_server.py` (serve)
+- **Single-agent entry points**: `train.py` (training), `evaluate.py` (eval), `deployment/inference_server.py` (serve)
+- **Multi-agent entry points**: `train_multiagent.py` (4-phase training), `evaluate_multiagent.py` (eval)
 - **Config source of truth**: `config.py` — all hyperparameters, block defs, curriculum stages, reward settings. `OreTypeConfig` / `ORE_TYPE_CONFIGS` centralizes per-ore metadata (Y-range, vein size, biome).
-- **Reward logic**: `env/reward_vector.py` (component computation), `env/preference.py` (scalarization)
-- **Tests**: `pytest` from repo root
+- **Multi-agent config**: `multiagent/config.py` — `MultiAgentConfig` dataclass with coordinator, belief map, A*, and task reward settings.
+- **Reward logic**: `env/reward_vector.py` (single-agent), `multiagent/agent/task_rewards.py` (multi-agent task rewards)
+- **Tests**: `pytest` from repo root (`tests/` for single-agent, `tests/multiagent/` for multi-agent)
 
-## Reward System
+## Architecture Overview
+
+```
+Single-Agent Pipeline (Stages 0-5):
+  train.py → MinecraftMiningEnv → MiningFeatureExtractor → MaskablePPO
+
+Multi-Agent Pipeline:
+  Coordinator (GNN + Hungarian, every K=50 steps or on event)
+    ├─ BeliefMap — Bernoulli(p_v) per voxel, Bayesian updates from telemetry
+    ├─ AnalyticalPrior — P(ore|y,biome) from ORE_SPAWN_CONFIGS
+    ├─ CoordinatorGNN — heterogeneous graph (agent nodes + region nodes)
+    │   ├─ GATv2Conv message passing → per-(agent, region) utility scores
+    │   └─ Trained end-to-end via REINFORCE on team mining reward
+    ├─ Hungarian Matching — optimal agent→region assignment from GNN scores
+    ├─ Bounding Box Constraints — user-defined spatial regions filter candidates
+    └─ Outputs: per-agent TaskAssignment (target_pos, ore_pref, task_type)
+         │
+         ▼
+  Agent (per turtle, every step)
+    ├─ Telemetry Events — block_observed/removed/added/changed, path_blocked
+    ├─ A* Pathfinder — congestion-aware cost field, dynamic replanning
+    ├─ Adapted RL Policy — FiLM+SE MaskablePPO for local mining
+    ├─ Mode Switch — A* while traveling, RL when within mining_radius
+    └─ Reports: telemetry events + 3-block observations → coordinator
+```
+
+Design philosophy: Classical planning (A*, Bayesian belief) handles navigation and world modeling. A GNN-based coordinator (trained end-to-end via RL) handles global task assignment. The existing FiLM+SE policy handles local mining behavior.
+
+## Multi-Agent System
+
+### File Structure
+
+```
+multiagent/
+├── config.py                          # MultiAgentConfig dataclass
+├── telemetry.py                       # TelemetryEvent, TelemetryEventType
+├── belief_map.py                      # BeliefMap (Bernoulli voxel model), ChunkState/Status
+├── geological_prior.py                # AnalyticalPrior — P(ore|y,biome)
+├── pathfinding.py                     # AStarPathfinder with congestion + dig-through
+├── shared_world.py                    # SharedWorld with occupancy grid + telemetry buffer
+├── agent/
+│   ├── multi_agent_env.py             # Per-agent env with A*/RL hybrid, telemetry
+│   ├── agent_policy.py                # MultiAgentFeatureExtractor (16ch, 80 scalars)
+│   ├── task_rewards.py                # Task-specific reward computation
+│   └── communication.py               # AgentMessage, MessageBuffer
+├── coordinator/
+│   ├── coordinator.py                 # Graph construction, GNN inference, Hungarian matching
+│   ├── gnn.py                         # CoordinatorGNN (HeteroConv + GATv2Conv)
+│   └── assignment.py                  # TaskAssignment, TaskType, BoundingBox dataclasses
+└── training/
+    ├── multi_agent_vec_env.py         # Single-process VecEnv, batched RL inference
+    ├── coordinator_trainer.py         # REINFORCE trainer for GNN, EMA baseline
+    └── task_sampler.py                # Weighted task sampling for Phase 1
+```
+
+### Telemetry Event System (`multiagent/telemetry.py`)
+
+Turtles have limited sensing: `turtle.inspect()` (front), `inspectUp()`, `inspectDown()` — 3 blocks per step. Plus dig-through reveals. All world knowledge flows through these observations.
+
+| Event Type | Trigger | Effect on BeliefMap |
+|---|---|---|
+| `BLOCK_OBSERVED` | 3-block inspection each step | Set p_v=1.0 (ore) or p_v=0.0 (non-ore) |
+| `BLOCK_REMOVED` | Agent mined a block | Mark as AIR, update chunk mined counts |
+| `BLOCK_ADDED` | Block appeared (gravel fall, player) | Treat as new observation |
+| `BLOCK_CHANGED` | Block type mismatch vs belief | Invalidate + neighbors, revert to prior |
+| `PATH_BLOCKED` | A* step failed (expected air, found solid) | Invalidate path, trigger A* replan |
+
+### Probabilistic Belief Map (`multiagent/belief_map.py`)
+
+Bernoulli voxel model: each voxel `v` has `p_v[ore_type]` = probability of containing that ore. Sparse storage — unobserved voxels implicitly use the geological prior.
+
+**Voxel states**: Unobserved (p=prior), Observed no-ore (p=0), Observed ore (p=1 + cluster propagation to neighbors).
+
+**Cluster propagation**: On ore find, boost unobserved neighbors: `p_u[ore] += λ * exp(-dist/r)` where λ=`cluster_strength` (0.3) and r = ore-specific radius from `OreTypeConfig.typical_vein_size`.
+
+**Chunk states**: `UNKNOWN` → `PARTIALLY_EXPLORED` → `EXPLORED` (>80% observed) → `EXHAUSTED` (E_remaining < ε for all ores).
+
+**Expected remaining**: `E_remaining[ore] = Σ p_v[ore]` over chunk voxels. Maintained incrementally.
+
+**Information gain**: Shannon entropy over unobserved voxels per chunk.
+
+### Analytical Geological Prior (`multiagent/geological_prior.py`)
+
+Precomputes `P(ore_type | y_sim, biome)` lookup table shape `(8, world_height, 5)` from `ORE_SPAWN_CONFIGS`. Handles MC→sim Y-coordinate conversion, triangle/uniform distributions, biome filtering, and cluster thresholds.
+
+Methods: `query(y_sim, biome_id) → ndarray(8,)`, `query_chunk(cx, cz, biome_map) → ndarray(8,)` expected ore, `get_cluster_radius(ore_type) → float`.
+
+### GNN Coordinator (`multiagent/coordinator/`)
+
+**Heterogeneous graph** built every K=50 steps:
+
+| Node Type | Features (dim) | Description |
+|---|---|---|
+| Agent (N_a) | 24 | position(3), fuel(1), inventory(8), current_target(3), steps_since_replan(1), preference(8) |
+| Region (N_r) | 20 | center(3), expected_remaining(8), info_gain(1), explored_frac(1), biome_onehot(5), assigned_agents(1), bbox_mask(1) |
+
+| Edge Type | Connectivity |
+|---|---|
+| agent → region | Fully connected bipartite |
+| region → agent | Reverse of above |
+| agent → agent | Pairs within 2×congestion_radius |
+| region → region | 4-adjacent chunks |
+
+**CoordinatorGNN**: HeteroConv wrapping GATv2Conv per edge type (3 layers, 4 heads, hidden=128). Score head: concat agent+region embeddings → MLP → scalar. Falls back to `CoordinatorGNNSimple` (MLP-only) when torch_geometric unavailable.
+
+**Hungarian matching**: `scipy.optimize.linear_sum_assignment` on negated GNN scores. O(N³) — 100 agents < 10ms. Bounding box hard mask sets out-of-bounds regions to -inf.
+
+**Task types** (`TaskType` enum): `MOVE_TO` (navigate), `EXCAVATE` (dig forward systematically), `MINE_ORE` (extract ore matching preference distribution), `RETURN_TO` (return to base).
+
+**Replan triggers**: Every K=50 steps (periodic), or on event (ore discovery, chunk exhausted, agent join/leave, multiple PATH_BLOCKED).
+
+### A* Pathfinder (`multiagent/pathfinding.py`)
+
+6-connected grid A* (no diagonals — turtles can't move diagonally). Manhattan heuristic.
+
+**Cost field**: `1.0` (air) + `dig_cost * is_solid` (3.0) + `congestion_cost * exp(-dist/radius)` near other agents (2.0, radius=3). Other agents are impassable.
+
+**Action conversion**: `get_next_action()` maps path steps to turtle actions (FORWARD, UP, DOWN, TURN_LEFT/RIGHT, DIG/DIG_UP/DIG_DOWN). Handles dig-before-move via `_pending_dig_action`.
+
+**Dynamic replan**: On PATH_BLOCKED, recompute from current position. Invalidate cached path if changed blocks are on the path.
+
+### Shared World (`multiagent/shared_world.py`)
+
+Wraps base `World` with multi-agent coordination:
+- **Occupancy grid**: `np.int16` matching world shape. -1=empty, else agent_id. O(1) collision checks.
+- **Agent registration/deregistration**, atomic `move_agent()` occupancy updates.
+- **Telemetry buffer**: Per-agent event collection, `flush_telemetry()` returns and clears.
+- **Agent spawning**: Randomized with min Manhattan distance constraint.
+- **Agent density channel**: `get_agent_density_map()` for voxel observation channel 16.
+
+### Multi-Agent Environment (`multiagent/agent/multi_agent_env.py`)
+
+Per-agent `gym.Env` wrapping a `SharedWorld`:
+
+**Observation space**:
+- Voxels: `(16, FOG_Y, FOG_X, FOG_Z)` float16 — 15 existing channels + agent density channel
+- Scalars: `(80,)` float32 — 70 existing dims + 10 task extras: `rel_target_xyz(3)`, `target_distance(1)`, `task_type_onehot(4)`, `distance_to_boundary(1)`, `inside_box_flag(1)`
+- Preference: `(8,)` float32
+
+**Hybrid navigation**: A* mode when distance > `mining_radius` (8 blocks), RL mode when close. A* provides action directly; RL policy sees full observation.
+
+**Step flow**: Inspect 3 blocks → detect mismatches → choose action (A* or RL) → execute with occupancy check → emit telemetry → compute task reward → check completion.
+
+### Multi-Agent Feature Extractor (`multiagent/agent/agent_policy.py`)
+
+Extends single-agent `MiningFeatureExtractor`:
+- 3D CNN: 16 input channels (15 base + agent density), 3 conv layers with FiLM conditioning + squeeze-excitation → 256-dim
+- Scalar MLP: 80 input dims → 128 → 64-dim
+- Output: concat [CNN(256), Scalars(64), Pref(8)] = **328-dim features**
+
+### Task Rewards (`multiagent/agent/task_rewards.py`)
+
+| Reward | Value | Condition |
+|---|---|---|
+| Task completion | +1.0 | Task-specific completion condition met |
+| Progress toward goal | +0.1 | Potential-based (closer to target) |
+| Block cleared | +0.05 | Any block mined (3x for target ore) |
+| Regress from target | -0.02 | Moved away from goal |
+| Idle (no useful action) | -0.01 | No block mined or progress |
+| Inside bounding box | +0.05/step | Agent within assigned region |
+| Outside bounding box | -0.2/step | Agent left assigned region |
+
+**MINE_ORE distribution-aware rewards**: Per-block reward weighted by `preference[ore] * rarity_mult[ore]` (capped at 3.0). Non-target ores give `progress_reward * 0.3` (tolerant). `SpawnRateNormalizer` derives rarity multipliers from worldgen data so 1 diamond counts as much as N coal. Potential-based alignment bonus (`alignment_bonus * delta_cosine_similarity`) nudges mining toward the target distribution after `alignment_min_ores` (3) blocks mined. Per-agent preferences are blended from team preference and regional ore availability via `preference_blend_alpha` (0.5).
+
+Task completion conditions: **MOVE_TO** — distance ≤ 1. **EXCAVATE** — blocks_cleared ≥ budget. **MINE_ORE** — coordinator decides (no auto-complete). **RETURN_TO** — same as MOVE_TO.
+
+### Inter-Agent Communication (`multiagent/agent/communication.py`)
+
+Message types: `ORE_FOUND`, `REGION_EMPTY`, `HAZARD`, `FUEL_LOW`. `MessageBuffer` with bounded inbox (max 50) and outbox for broadcast. Agents emit `ORE_FOUND` on discovering target ore.
+
+### 4-Phase Training (`train_multiagent.py`)
+
+| Phase | Description | Steps | Agents | Coordinator |
+|---|---|---|---|---|
+| 1 | Single-agent task mastery | 4M | 1 | TaskSampler (random tasks) |
+| 2 | Multi-agent execution | 2M | 4→8→16→32 | Heuristic (belief map) |
+| 3 | Coordinator GNN training | 2M | 32 | GNN (REINFORCE), agents frozen |
+| 4 | Joint training | 3M | 32 | Blended: α lerp(heuristic, GNN) |
+
+**Phase 1 task sampling** (`multiagent/training/task_sampler.py`): Weighted — MOVE_TO 35%, EXCAVATE 40%, MINE_ORE 20%, RETURN_TO 5%. MINE_ORE tasks use Dirichlet(0.5) preference vectors by default; other task types use one-hot. Curriculum difficulty: small→large boxes, short→long distances.
+
+**Phase 2 agent count curriculum**: 4 → 8 → 16 → 32 agents (increase every 500K steps).
+
+**Phase 3 REINFORCE** (`multiagent/training/coordinator_trainer.py`): GNN scores → log-softmax → gather matched pairs → policy gradient with EMA baseline. Entropy bonus (0.01) prevents assignment collapse. Grad clipping at 1.0.
+
+**Phase 4 blended assignment**: α schedule [0.1, 0.3, 0.6, 1.0] stepped every 750K steps.
+
+### Multi-Agent VecEnv (`multiagent/training/multi_agent_vec_env.py`)
+
+Single-process `MultiAgentVecEnv` — all agents share one `SharedWorld` + `BeliefMap` + `Coordinator`. Each step: override A*-mode actions → step all envs → flush telemetry → update belief → replan if K steps elapsed. `num_envs = n_agents`.
+
+### Multi-Agent Config (`multiagent/config.py`)
+
+Key defaults:
+
+| Category | Parameter | Default |
+|---|---|---|
+| Coordinator | `coordinator_interval_k` | 50 |
+| GNN | `gnn_hidden_dim` / `layers` / `heads` | 128 / 3 / 4 |
+| Belief map | `cluster_strength` / `cluster_radius` | 0.3 / 4.0 |
+| A* | `dig_cost` / `congestion_cost` / `congestion_radius` | 3.0 / 2.0 / 3 |
+| Navigation | `mining_radius` | 8 |
+| Task rewards | completion / progress / block_cleared | 1.0 / 0.1 / 0.05 |
+| Boundary | `box_stay_bonus` / `box_leave_penalty` | 0.05 / -0.2 |
+| MINE_ORE | `alignment_bonus` / `rarity_mult_cap` | 0.05 / 5.0 |
+| MINE_ORE | `alignment_min_ores` / `preference_blend_alpha` | 3 / 0.5 |
+| Scale | `max_agents` | 100 |
+
+### Config Extensions (`config.py`)
+
+Added constants for multi-agent observation dimensions:
+- `CH_AGENT_DENSITY = 15` — index of agent density voxel channel
+- `SCALAR_OBS_DIM_MULTI = SCALAR_OBS_DIM + 10` (80) — task extras
+- `CHUNK_SIZE_XZ = 16` — XZ chunk granularity for belief map
+
+---
+
+## Single-Agent Reward System
 
 Two reward configurations exist: **Stage 1** (curriculum stage 0) and **Stages 2-5** (potential-based). Both produce four components (`r_harvest`, `r_adjacent`, `r_clear`, `r_ops`) that are scalarized via:
 
@@ -84,7 +303,7 @@ R = harvest_alpha * r_harvest + r_adjacent + r_clear + r_ops
 - **Adjacent penalty with decay**: Escalating skip penalty creates urgency around visible desired ores without harsh clipping.
 - **All components in [-1, +1]**: Ensures stable PPO value function learning and VecNormalize statistics.
 
-## Curriculum Stages
+## Single-Agent Curriculum Stages
 
 | Stage | Name | World Size | Ore Density | Fuel | Coal Refuel | Caves | Preference | Max Steps |
 |---|---|---|---|---|---|---|---|---|

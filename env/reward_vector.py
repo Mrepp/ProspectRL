@@ -14,14 +14,15 @@ import math
 
 import numpy as np
 from prospect_rl.config import (
+    ORE_INDEX,
     ORE_TYPES,
     Action,
     RewardConfig,
     Stage1RewardConfig,
 )
 
-# Pre-compute ore-type index lookup for fast reward assignment
-_ORE_INDEX: dict[int, int] = {int(bt): i for i, bt in enumerate(ORE_TYPES)}
+# Alias for backward compatibility (used by mining_env.py import)
+_ORE_INDEX = ORE_INDEX
 
 # Dig actions (6-8)
 _DIG_ACTIONS = frozenset({Action.DIG, Action.DIG_UP, Action.DIG_DOWN})

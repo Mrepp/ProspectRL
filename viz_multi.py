@@ -19,6 +19,9 @@ Usage::
     # 2 of each ore type
     python viz_multi.py -m model.zip --count 2
 
+    # Real Minecraft chunk worlds
+    python viz_multi.py -m model.zip --cache-dir data/chunk_cache/default
+
 Controls (inside the 3D window)::
 
     Space       step forward (all turtles)
@@ -51,10 +54,13 @@ except ImportError:
 from prospect_rl.config import (
     CURRICULUM_STAGES,
     NUM_ORE_TYPES,
+    ORE_TYPE_CONFIGS,
     ORE_TYPES,
     Action,
     BlockType,
 )
+
+_STAGE1_REAL_EVAL_INDEX = 6
 from prospect_rl.env.turtle import FACING_VECTORS
 
 from viz_episode import (
@@ -149,6 +155,7 @@ def record_episode_fast(
     seed: int = 42,
     preference: np.ndarray | None = None,
     vecnormalize_path: str | None = None,
+    cache_dir: str | None = None,
 ) -> Trajectory:
     """Record an episode reusing the cached model."""
     from prospect_rl.env.mining_env import MinecraftMiningEnv
@@ -156,7 +163,22 @@ def record_episode_fast(
     model = _model_cache.get(model_path)
     stage = CURRICULUM_STAGES[stage_index]
 
-    env = MinecraftMiningEnv(curriculum_stage=stage_index, seed=seed)
+    env_kwargs: dict = {
+        "curriculum_stage": stage_index,
+        "seed": seed,
+    }
+    if cache_dir is not None:
+        from prospect_rl.env.world.real_chunk_world import RealChunkWorld
+        env_kwargs["world_class"] = RealChunkWorld
+        env_kwargs["cache_dir"] = cache_dir
+        # Auto-detect required biome from one-hot preference
+        if preference is not None and np.max(preference) == 1.0:
+            target_idx = int(np.argmax(preference))
+            forced = ORE_TYPE_CONFIGS[target_idx].forced_biome
+            if forced is not None:
+                env_kwargs["required_biome"] = int(forced)
+
+    env = MinecraftMiningEnv(**env_kwargs)
     obs, info = env.reset()
 
     if hasattr(env._world, "_grid"):
@@ -349,12 +371,14 @@ class MultiTurtleVisualizer:
         seed: int = 42,
         speed_ms: int = 200,
         vecnormalize_path: str | None = None,
+        cache_dir: str | None = None,
     ) -> None:
         self._model_path = model_path
         self._stage_index = stage_index
         self._seed = seed
         self._speed_ms = speed_ms
         self._vn_path = vecnormalize_path
+        self._cache_dir = cache_dir
 
         # Shared world (set on first recording)
         self._world_blocks: np.ndarray | None = None
@@ -411,6 +435,7 @@ class MultiTurtleVisualizer:
         first_traj = record_episode_fast(
             self._model_path, self._stage_index,
             self._seed, first_pref, self._vn_path,
+            cache_dir=self._cache_dir,
         )
         self._world_blocks = first_traj.world_blocks.copy()
         self._world_size = first_traj.world_size
@@ -431,6 +456,7 @@ class MultiTurtleVisualizer:
             return spec, record_episode_fast(
                 self._model_path, self._stage_index,
                 self._seed, pref, self._vn_path,
+                cache_dir=self._cache_dir,
             )
 
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -472,10 +498,13 @@ class MultiTurtleVisualizer:
     # ------------------------------------------------------------------
 
     def _render_world(self, pl: pv.Plotter) -> None:
-        """Render ore blocks, caves, and bedrock (static)."""
+        """Render only ore blocks + a floor plane (fast)."""
         if self._world_blocks is None:
             return
         blocks = self._world_blocks
+        sx, sy, sz = blocks.shape
+
+        # Ore blocks only — the main visual content
         for bt in ORE_ORDER:
             mesh = _voxels_for_block(blocks, bt)
             if mesh is not None:
@@ -489,25 +518,17 @@ class MultiTurtleVisualizer:
                     name=f"ore_{bt}",
                 )
 
-        air_mesh = _voxels_for_block(blocks, BlockType.AIR)
-        if air_mesh is not None:
-            pl.add_mesh(
-                air_mesh,
-                color=BLOCK_COLORS[BlockType.AIR],
-                label="Caves",
-                opacity=0.1,
-                name="caves",
-            )
-
-        bed_mesh = _voxels_for_block(blocks, BlockType.BEDROCK)
-        if bed_mesh is not None:
-            pl.add_mesh(
-                bed_mesh,
-                color=BLOCK_COLORS[BlockType.BEDROCK],
-                label="Bedrock",
-                opacity=0.25,
-                name="bedrock",
-            )
+        # Thin floor plane at Y=0 for spatial reference
+        floor = pv.Plane(
+            center=(sx / 2 - 0.5, -0.5, sz / 2 - 0.5),
+            direction=(0, 1, 0),
+            i_size=sx,
+            j_size=sz,
+        )
+        pl.add_mesh(
+            floor, color="#333344", opacity=0.3,
+            name="floor",
+        )
 
     # ------------------------------------------------------------------
     # Turtle rendering
@@ -1187,6 +1208,11 @@ def main() -> None:
         help="Environment seed (default: 42)",
     )
     parser.add_argument(
+        "--cache-dir", type=str, default=None,
+        help="Chunk cache directory for real-chunk worlds "
+             "(e.g. data/chunk_cache/default)",
+    )
+    parser.add_argument(
         "--turtles", type=str, default=None,
         help=(
             "Comma-separated ore specs "
@@ -1250,13 +1276,20 @@ def main() -> None:
         stage_index = 0
         print("No stage detected, defaulting to stage 0")
 
+    cache_dir = args.cache_dir
+    if cache_dir is not None and stage_index == 0:
+        stage_index = _STAGE1_REAL_EVAL_INDEX
+        print(f"Auto-selected stage1_real_eval (stage {stage_index}) "
+              "for real chunks with Stage 1 rewards")
+
     # ---- Parse turtle specs ----
     specs = _parse_turtle_specs(args.turtles, args.count)
     print(f"Loading model from {model_path}...")
     if vn_path:
         print(f"Using vecnormalize from {vn_path}")
+    world_label = f"real chunks ({cache_dir})" if cache_dir else "procedural"
     print(f"Recording {len(specs)} turtle(s) on seed={args.seed}, "
-          f"stage={stage_index}...")
+          f"stage={stage_index}, world={world_label}...")
 
     # ---- Build visualizer and record ----
     viz = MultiTurtleVisualizer(
@@ -1265,6 +1298,7 @@ def main() -> None:
         seed=args.seed,
         speed_ms=args.speed,
         vecnormalize_path=vn_path,
+        cache_dir=cache_dir,
     )
     viz._playing = args.autoplay
     viz.record_all(specs)
